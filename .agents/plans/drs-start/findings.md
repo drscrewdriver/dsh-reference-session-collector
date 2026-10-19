@@ -202,8 +202,9 @@
   /api 路由(CCI 同闸,非 DRS 缺陷):无 cookie 401,?token= 引导换
   set-cookie 后 200;GUI 内 fetch 自动带 cookie,跨仓接线不受影响。
   0.2.1-rc.2/0.1.0/0.1.1 无此闸(裸 fetch 200)。
-- **沙盒内 tokenizer**:格子 projection.db 均 4KB 空图——沙盒会话语料
-  极少/无沙箱资产时 basis 面照常工作;真 ds-token 臂已在真实 desktop
-  profile 实锤(上轮 basis=ds-token)。
+- **沙盒内语料**：格子 projection.db 均为 4KB 最小页但非空库——0.1.0 格
+  实投影 5 会话/20 段、0.1.7 格 11 会话/157 段（沙盒自产会话），
+  解码/投影/检索全链路在老线沙数据上跑通；真 ds-token 臂已在真实
+  desktop profile 实锤（上轮 basis=ds-token）。
 - **结论**:engines.dsh 17 条声明在本农场可达的 8 线全部实证成立
   (host 半装载/开库/路由三线形状一致);三仓接线可开工。

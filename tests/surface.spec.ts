@@ -61,6 +61,7 @@ function summary(over: Partial<SessionSummary> & Pick<SessionSummary, 'sessionId
     recallPairs: 0,
     basis: 'chars/4',
     lastTimeMs: 1000,
+    formatGeneration: 4,
     ...over,
   }
 }
@@ -139,7 +140,7 @@ describe('status / listSessions(缓存层 2)', () => {
     expect(report['sessions']).toBe(2)
     expect(report['segments']).toBe(6)
     expect(report['replaces']).toBe(2)
-    expect(report['schema_version']).toBe('1')
+    expect(report['schema_version']).toBe('2')
     const cache = report['cache'] as Record<string, unknown>
     expect(cache['summaries']).toBe(2)
     expect(cache['surface_ledger']).toHaveProperty('hits')

@@ -11,8 +11,8 @@ import { join } from 'node:path'
 import type { SessionProjection, SessionSummary } from './projection.ts'
 import { segmentForIndex } from './segment.ts'
 
-/** schema 版本（meta 表；断裂式迁移的比对基线）。 */
-export const PROJECTION_SCHEMA_VERSION = '1'
+/** schema 版本（meta 表；断裂式迁移的比对基线）。v2=加 sessions.format_generation。 */
+export const PROJECTION_SCHEMA_VERSION = '2'
 
 /** sessions 表原始行（snake_case 与 DDL 一致）。 */
 export interface SessionRow {
@@ -33,6 +33,7 @@ export interface SessionRow {
   artifact_bytes: number
   artifact_mtime_ms: number
   last_time_ms: number
+  format_generation: number
   archived: number
   synced_at: string
 }
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS sessions(
   recall_pairs INTEGER DEFAULT 0, basis TEXT DEFAULT 'chars/4',
   artifact_bytes INTEGER DEFAULT 0, artifact_mtime_ms INTEGER DEFAULT 0,
   last_time_ms INTEGER DEFAULT 0,
+  format_generation INTEGER DEFAULT -1,
   archived INTEGER DEFAULT 0,
   synced_at TEXT DEFAULT (datetime('now')));
 CREATE INDEX IF NOT EXISTS idx_sessions_dir ON sessions(dir_id);
@@ -113,6 +115,7 @@ function summaryToRow(s: SessionSummary, artifactBytes: number, artifactMtimeMs:
     artifact_bytes: artifactBytes,
     artifact_mtime_ms: artifactMtimeMs,
     last_time_ms: s.lastTimeMs,
+    format_generation: s.formatGeneration,
     archived: extra?.archived ?? 0,
     synced_at: new Date().toISOString(),
   }
@@ -135,6 +138,11 @@ PRAGMA mmap_size=268435456;
 PRAGMA application_id=0x44525353;
 `)
   db.exec(DDL)
+  // v1→v2 就地迁移：旧库补 format_generation 列（重复执行安全：先查表面）。
+  const cols = db.prepare('PRAGMA table_info(sessions)').all() as unknown as { name: string }[]
+  if (!cols.some(c => c.name === 'format_generation')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN format_generation INTEGER DEFAULT -1')
+  }
   db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
     .run('schema_version', PROJECTION_SCHEMA_VERSION)
 
@@ -157,8 +165,8 @@ PRAGMA application_id=0x44525353;
   const upsertSession = db.prepare(`INSERT INTO sessions(
     session_id, dir_id, title, cwd, event_count, max_seq, turn_count, segment_tokens,
     surface_tokens, gross_saved, recall_tokens, compress_pairs, recall_pairs, basis,
-    artifact_bytes, artifact_mtime_ms, last_time_ms, archived, synced_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    artifact_bytes, artifact_mtime_ms, last_time_ms, format_generation, archived, synced_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(session_id) DO UPDATE SET
       dir_id=excluded.dir_id, title=excluded.title, cwd=excluded.cwd,
       event_count=excluded.event_count, max_seq=excluded.max_seq,
@@ -167,7 +175,8 @@ PRAGMA application_id=0x44525353;
       recall_tokens=excluded.recall_tokens, compress_pairs=excluded.compress_pairs,
       recall_pairs=excluded.recall_pairs, basis=excluded.basis,
       artifact_bytes=excluded.artifact_bytes, artifact_mtime_ms=excluded.artifact_mtime_ms,
-      last_time_ms=excluded.last_time_ms, archived=excluded.archived,
+      last_time_ms=excluded.last_time_ms, format_generation=excluded.format_generation,
+      archived=excluded.archived,
       synced_at=excluded.synced_at`)
 
   return {
@@ -198,7 +207,8 @@ PRAGMA application_id=0x44525353;
           row.session_id, row.dir_id, row.title, row.cwd, row.event_count, row.max_seq,
           row.turn_count, row.segment_tokens, row.surface_tokens, row.gross_saved,
           row.recall_tokens, row.compress_pairs, row.recall_pairs, row.basis,
-          row.artifact_bytes, row.artifact_mtime_ms, row.last_time_ms, row.archived, row.synced_at)
+          row.artifact_bytes, row.artifact_mtime_ms, row.last_time_ms, row.format_generation,
+          row.archived, row.synced_at)
         db.exec('COMMIT')
       } catch (error) {
         db.exec('ROLLBACK')

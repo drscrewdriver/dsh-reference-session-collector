@@ -75,6 +75,8 @@ export interface SessionSummary {
   recallPairs: number
   basis: 'ds-token' | 'chars/4'
   lastTimeMs: number
+  /** 文件头自声明格式代次（0..4 放行；-1=无 header 版本，理论上不至）。 */
+  formatGeneration: number
 }
 
 /** 一次完整投影结果。 */
@@ -418,6 +420,7 @@ export function projectSessionEvents(
     }
   }
   const header = options.header
+  const formatGeneration = header !== undefined && typeof header['version'] === 'number' ? header['version'] : -1
   const summary: SessionSummary = {
     sessionId,
     dirId,
@@ -434,6 +437,7 @@ export function projectSessionEvents(
     recallPairs,
     basis,
     lastTimeMs,
+    formatGeneration,
   }
   return { summary, segments, replaces }
 }

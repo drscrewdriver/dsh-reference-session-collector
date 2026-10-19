@@ -68,6 +68,7 @@ describe('ProjectionSync × 真库端到端', () => {
     expect(first.updated).toBe(1)
     expect(first.softSkips).toHaveLength(0)
     expect(store.summaries.get('sess-e2e')?.basis).toBe('chars/4')
+    expect(store.summaries.get('sess-e2e')?.format_generation).toBe(4)
     expect(store.summaries.get('sess-e2e')?.gross_saved).toBe(Math.ceil('first body text'.length / 4) - 1)
     const segCount = (store.db.prepare('SELECT COUNT(*) AS c FROM segments').get() as { c: number }).c
     expect(segCount).toBe(3)

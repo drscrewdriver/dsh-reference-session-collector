@@ -232,6 +232,20 @@ describe('ProjectionSync.syncAll', () => {
     expect(warns).toHaveLength(2)
   })
 
+  it('accepts legacy generations 0/1/2 (农场实锤：0.1.0-0.1.2 宿主自写代次=0，不得整库软跳)', async () => {
+    const dshHome = makeDshHome()
+    writeSessionFixture(dshHome, 'sess-v0', { type: 'session', id: 'sess-v0', version: 0 }, EVENTS_A)
+    writeSessionFixture(dshHome, 'sess-v1', { type: 'session', id: 'sess-v1', version: 1 }, EVENTS_A)
+    writeSessionFixture(dshHome, 'sess-v2', { type: 'session', id: 'sess-v2', version: 2 }, EVENTS_A)
+    const store = createMockStore()
+    const projection = createMockProjection()
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+    const res = await sync.syncAll({ dshHome })
+    expect(res.softSkips).toEqual([])
+    expect(res.updated).toBe(3)
+    expect(projection.calls).toHaveLength(3)
+  })
+
   it('flips sessions.archived with the workspace.json archive set (read-only), including brand-new sessions', async () => {
     const dshHome = makeDshHome()
     writeSessionFixture(dshHome, 'sess-a', HEADER_A, EVENTS_A)

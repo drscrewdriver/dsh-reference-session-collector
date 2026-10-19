@@ -75,12 +75,15 @@ export function status(ctx: QueryContext, lastSync?: unknown): Record<string, un
   const row = store.db.prepare('SELECT COUNT(*) AS c FROM segments').get() as { c: number }
   const replaceCount = store.db.prepare('SELECT COUNT(*) AS c FROM replaces').get() as { c: number }
   const version = store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined
+  // 代次分布哨兵：老代(0-2)语料块形状可能不完整是如实事实，暴露给消费方自检。
+  const gens = store.db.prepare('SELECT format_generation AS generation, COUNT(*) AS n FROM sessions GROUP BY format_generation ORDER BY format_generation').all() as unknown as { generation: number; n: number }[]
   return {
     ok: true,
     sessions: store.summaries.size,
     segments: row.c,
     replaces: replaceCount.c,
     schema_version: version?.value ?? 'unknown',
+    generations: gens,
     cache: {
       summaries: store.summaries.size,
       surface_ledger: ctx.surfaceLru.stats(),

@@ -134,8 +134,13 @@ describe('projectSessionEvents', () => {
     expect(bySeq.get(3)?.kind).toBe('tool/call')
   })
 
-  it('缺省 sessionId=dirId', () => {
+  it('缺省 sessionId=dirId；formatGeneration 随 header.version 透传（无 header=-1）', () => {
     const p = projectSessionEvents([], { dirId: 'only-dir' })
     expect(p.summary.sessionId).toBe('only-dir')
+    expect(p.summary.formatGeneration).toBe(-1)
+    const legacy = projectSessionEvents([], { dirId: 'd', header: { type: 'session', version: 0 } })
+    expect(legacy.summary.formatGeneration).toBe(0)
+    const modern = projectSessionEvents([], { dirId: 'd', header: { type: 'session', version: 4 } })
+    expect(modern.summary.formatGeneration).toBe(4)
   })
 })

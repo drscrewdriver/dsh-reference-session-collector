@@ -27,6 +27,17 @@ import {
 import { deepSeekV4TokenizerForModel } from './deepseek-v4-tokenizer.ts'
 import type { CanonicalTextTokenCounter } from './token-count.ts'
 
+/**
+ * DRS 放行代次集（按文件头自声明 version 判，不猜宿主版本）。
+ * 农场实锤（2026-10-20）：0.1.0-0.1.2 宿主自写代次=0，原 {3,4} 集
+ * 在老线整库软跳（36/32/4 文件不投）。迁移包证据：v0→v1 恒等边，
+ * 事件 type 体系 v0..v4 同形；v2→v3/v3→v4 才是字段级重写（迁移是
+ * 宿主职责，DRS 只读不迁移）——故老代放行后内容块形状对不上时
+ * text/search_text 自然为空不落行，**永不伪造**；generation 随会话
+ * 如实入库可查。>4 未知代仍 fail-soft 软跳+一次性 warn。
+ */
+export const ACCEPTED_FORMAT_GENERATIONS: ReadonlySet<number> = new Set([0, 1, 2, 3, 4])
+
 // ─────────────────────────── 目录发现 ───────────────────────────
 
 /** 一个会话目录的发现事实:目录名 + 当前代产物。 */
@@ -316,7 +327,7 @@ export class ProjectionSync {
     }
     // readFileSync:唯一触碰会话文件的调用,永远没有写对偶。
     const log = decodeSessionLogBytes(readFileSync(found.artifact.path))
-    const verdict = classifySessionHeader(log.header)
+    const verdict = classifySessionHeader(log.header, ACCEPTED_FORMAT_GENERATIONS)
     if (verdict.state !== 'known') {
       const key = `${found.dirSessionId}:${verdict.state}`
       if (!this.warnedSoftSkips.has(key)) {
