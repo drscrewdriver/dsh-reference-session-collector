@@ -138,29 +138,26 @@
   代码重推,事实基线:title 已由 extractTitleFromEvents 落 summary.title,
   旧 gap-1 不成立)。
 
-## 二期接线事实(T7.0 对照表 + steward drs-corpus 分支,2026-10-19)
+## 装机实锤轮(2026-10-20 凌晨,双 profile)
 
-**T7.0 字段对照表(DRS wire → steward 引擎列;阻塞项核对=齐备,已实现)**
-
-| steward 列 | DRS 来源 | 说明 |
-|---|---|---|
-| docs.session_id | 请求参数 session(回显) | 检索臂行不含 session_id,由头部行补 |
-| docs.seq | rows[].seq | |
-| docs.type | rows[].kind | 同一事件类型词表,TYPE_WEIGHT/类型过滤不变 |
-| docs.surface | rows[].on_surface | 1→'current' / 0→'shadowed';检索域仍只搜 current |
-| docs.time | rows[].time | per-doc 时间 |
-| docs.text | rows[].search_text | DRS 视界=steward 抽取超集(tool/call args+todo/write+turn/end 错误)→ 命中面只宽不窄 |
-| docs.index_text | segmentForIndex(search_text) | steward 自有切分面不动,引擎重算 |
-| sessions.version | sessions.artifact_mtime_ms | 水位代理:日志重写必 bump mtime;首次切源全量重灌一轮(version 整数 vs mtime 毫秒不同域,有意代价) |
-| sessions.updated_at | sessions.last_time_ms | 日期过滤/时间排序键 |
-| sessions.title/cwd/archived | sessions 同名列 | 标题空串保留旧行(CASE);archived 插行即带 + setArchived 双保险 |
-
-缺口记录:检索臂行不含 role(steward docs 无此列,不需要);DRS 信任门为精确匹配,
-steward 侧以 Host 头回显首个 trustedHosts 条目对齐(条目省略端口时 URL 带端口会失配)。
-
-**steward 侧落地(分支 drs-corpus,commit b90def4)**:engine.upsertSessionDocs(docs
-直插面,fts 外部内容表手动同步复用原范式)· host/index/drs-source.ts(HTTP 客户端)
-· sync.ts 第 7 构造参 SwitchDrsCorpusSource 端口 + runDrsPass + 整轮回退原生链路 ·
-config corpusSource('native' 缺省)/drsBaseUrl(volatile 探针式 schema 同步)·
-tests/drs-corpus.spec.ts —— steward 全套 224/224 绿、typecheck 干净。
-真机半(T7.2 新鲜度≤1 分钟)待 DRS 装机后验收。
+- **装机完成**:desktop+web 两 profile 均 deps=file:…0.1.0-local.2.tgz,
+  bundles 激活(33/44 条),8 文件哈希 MATCH 仓内,备份在
+  `e:\test\rewrite-agently\_drs-install-20261019-235249\`。宿主 0.2.0-rc.2。
+- **真机数据面(重量级证据)**:46 会话全量投影/14,851 segments/323
+  replaces;**37 会话有替换对**;basis=ds-token(宿主内原生 tokenizer 真加载,
+  非 chars/4 降级臂);样本对账 gross_saved=6920、surface 250 在面行+1 指针;
+  中文 search 真命中 tool/result;LRU hits/misses 运转。
+- **双根因修复(400 空体破案过程实录)**:宿主 webServer 对 handler 抛异常
+  全局兑底 writeHead(400) 空体(dsh-host-webserver lib/index.js:248-256,
+  异常只进 ctx.logger 不上 console)。根因=**cordis Context 对未声明
+  inject 的服务面访问会抛**,且不仅 ctx.get()——**Proxy 属性读臂也抛**
+  (readStartupFace 直读 ctx.webStartup 未保护→请求期抛)。修复=
+  safeReadService 两层 try(属性读+get),register.spec 加 Proxy hostile
+  回归(属性读/get 全抛形态)。旧教训修正:inject 只声明 webServer 时,
+  读 webStartup/webRuntime 必须全臂包裹,不可裸属性访问。
+- **pnpm store 同版钉死重现(第三次)**:file: tgz 改内容不改版号时
+  `pnpm install`/`--force` 都不刷新 node_modules(store 以版本为键)——
+  本地迭代必须递 `-local.X`(本轮 0.1.0→local.1→local.2)。
+- **遗留**:仓根旧 `dsh-reference-session-0.1.0.tgz` 残留(DeleteFile 工具
+  异常未删,gitignore 已挡,待手动清);desktop 宿主 GUI 未启动验证
+  (装机+哈希已对,桌面端重启由用户触发);T9.1 二次同步耗时实测待跑。
