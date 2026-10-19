@@ -144,3 +144,30 @@ describe('projectSessionEvents', () => {
     expect(modern.summary.formatGeneration).toBe(4)
   })
 })
+
+describe('projectSessionEvents × 注入剥离（horizon v2）', () => {
+  const injected = '<relevant-memories>\n召回记忆：DRS 装机纪律\n</relevant-memories>\n\n<system-reminder>当前时间提示</system-reminder>\n\n我的真实问题：节选对不上怎么修'
+  const stripEvents = [
+    { type: 'step/start', seq: 0, time: 1, data: { turn: 1, step: 1 } },
+    { type: 'user/message', seq: 1, time: 2, data: { content: [{ type: 'text', text: injected }], message: { content: [{ type: 'text', text: injected }] } } },
+  ]
+
+  it('search_text 剥注入段只留真实问题；text/tokens 保持 CCI 口径原文全量', () => {
+    const p = projectSessionEvents(stripEvents, { dirId: 'd' })
+    const row = p.segments.find(s => s.seq === 1)
+    expect(row).toBeDefined()
+    expect(row?.searchText).toBe('我的真实问题：节选对不上怎么修')
+    // CCI 口径不剥：text 含注入段原文，tokens 按全文计数（R5 对账不变）。
+    expect(row?.text).toContain('relevant-memories')
+    expect((row?.tokens ?? 0)).toBeGreaterThan(Math.ceil((row?.searchText.length ?? 0) / 4))
+  })
+
+  it('纯注入消息：行仍入库（text 非空）但 search_text 为空——不入 fts 面', () => {
+    const pure = projectSessionEvents([
+      { type: 'user/message', seq: 7, time: 3, data: { content: [{ type: 'text', text: '<scene-navigation>导航样板</scene-navigation>' }], message: { content: [{ type: 'text', text: '<scene-navigation>导航样板</scene-navigation>' }] } } },
+    ], { dirId: 'd' })
+    const row = pure.segments.find(s => s.seq === 7)
+    expect(row?.searchText).toBe('')
+    expect(row?.text).toBe('<scene-navigation>导航样板</scene-navigation>')
+  })
+})

@@ -11,8 +11,12 @@ import { join } from 'node:path'
 import type { SessionProjection, SessionSummary } from './projection.ts'
 import { segmentForIndex } from './segment.ts'
 
-/** schema 版本（meta 表；断裂式迁移的比对基线）。v2=加 sessions.format_generation。 */
-export const PROJECTION_SCHEMA_VERSION = '2'
+/** schema 版本（meta 表；断裂式迁移的比对基线）。
+ * v2=加 sessions.format_generation；
+ * v3=search_text 视界变更（剥离宿主注入样板段，strip-injected horizon v2）——
+ * 旧行含污染语料且 artifact 水位未变、增量轮永不重投，故跨 v3 整库清空，
+ * 下一轮 syncAll 全量重建（投影可重建，丢行无损）。 */
+export const PROJECTION_SCHEMA_VERSION = '3'
 
 /** sessions 表原始行（snake_case 与 DDL 一致）。 */
 export interface SessionRow {
@@ -138,10 +142,25 @@ PRAGMA mmap_size=268435456;
 PRAGMA application_id=0x44525353;
 `)
   db.exec(DDL)
-  // v1→v2 就地迁移：旧库补 format_generation 列（重复执行安全：先查表面）。
+  // 断裂式迁移：旧库 schema_version 存在且与新串不同 → 整库清空（投影可重建）。
+  // v1→v2 时代旧库先补列再判（列检查幂等安全）。
   const cols = db.prepare('PRAGMA table_info(sessions)').all() as unknown as { name: string }[]
   if (!cols.some(c => c.name === 'format_generation')) {
     db.exec('ALTER TABLE sessions ADD COLUMN format_generation INTEGER DEFAULT -1')
+  }
+  const previous = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined
+  if (previous !== undefined && previous.value !== PROJECTION_SCHEMA_VERSION) {
+    db.exec('BEGIN')
+    try {
+      db.prepare('DELETE FROM sessions').run()
+      db.prepare('DELETE FROM segments').run()
+      db.prepare('DELETE FROM replaces').run()
+      db.prepare('DELETE FROM segments_fts').run()
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
   }
   db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
     .run('schema_version', PROJECTION_SCHEMA_VERSION)

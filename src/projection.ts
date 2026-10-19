@@ -7,13 +7,17 @@
  *   （富块计 0），与 `dsh-context-compression-improved`
  *   `packages/selector/src/runtime/savings-verify.ts:66-80` 同公式同词表；
  * - **search_text**＝steward `extractSessionEventText` 逐字同构（tool/call 参数、
- *   todo/write、turn/end 错误原因入面；reasoning 不入）；
+ *   todo/write、turn/end 错误原因入面；reasoning 不入）+ **宿主注入样板段
+ *   剥离**（strip-injected，2026-10-20 真机取证：39% 用户消息含记忆召回/人格
+ *   等注入段，不剥则节选/命中对不上关键词）；只影响检索面，
+ *   text/tokens 的 CCI 口径不动（R5）；
  * - **on_surface**＝surface 重放：replace 对剔除 [start..end]、自身入面，
  *   从未被任何 pair 覆盖的行=1（checklist「被覆盖区间=0、replace 自身=1」）。
  * surfaceOp 双形状容错：`{op:'replace', startSeq, endSeq}`（CCI 写入）与
  * `{op:'replace', start, end}`（解码叶子接口注释）都认。
  */
 import type { DecodedEvent } from './session-file-decode.ts'
+import { stripInjectedBlocks } from './strip-injected.ts'
 
 /** 精确计数器（tokenizer.countText 的数值臂）；缺席时 chars/4 上界。 */
 export type ExactCounter = (text: string) => number
@@ -329,7 +333,8 @@ export function projectSessionEvents(
   const rowBySeq = new Map<number, ProjectionSegment>()
   for (const event of events) {
     const text = textBySeq.get(event.seq) ?? ''
-    const searchText = extractSearchEventText(event)
+    // 检索面过注入剥离；CCI 口径 text 保持原文（horizon v2，schema v3）。
+    const searchText = stripInjectedBlocks(extractSearchEventText(event))
     if (text === '' && searchText === '') continue
     const pointer = pointerBySeq.get(event.seq)
     const row: ProjectionSegment = {

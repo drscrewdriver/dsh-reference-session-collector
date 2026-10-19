@@ -1,6 +1,7 @@
 /**
  * T2.4 投影库断言：临时目录建库 → replaceSession 两次幂等（行数稳定）
- * → 重开库数据仍在；FTS5 虚表在 node:sqlite 下可用（普通表直插）。
+ * → 重开库数据仍在；FTS5 虚表在 node:sqlite 下可用（普通表直插）；
+ * v3 断裂迁移：旧库 schema_version 异串 → 跨 v3 整库清空重建。
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -64,5 +65,36 @@ describe('openProjectionStore / replaceSession', () => {
     } finally {
       reopened.close()
     }
+  })
+
+  it('v3 断裂迁移：meta 旧串 v2 的库重开 → 四表清空、版本改写、常驻 Map 空', () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'drs-legacy-'))
+    const projection = projectSessionEvents(events, { dirId: 'd9', sessionId: 's9' })
+    const seed = openProjectionStore(legacyDir)
+    seed.replaceSession(projection, 10, 20)
+    // 模拟旧库：把版本串改回 v2（列结构同构，只有版本差异）
+    seed.db.prepare("UPDATE meta SET value='2' WHERE key='schema_version'").run()
+    seed.close()
+
+    const migrated = openProjectionStore(legacyDir)
+    try {
+      const version = migrated.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string }
+      expect(version.value).toBe('3')
+      expect(migrated.summaries.size).toBe(0)
+      expect((migrated.db.prepare('SELECT COUNT(*) AS c FROM sessions').get() as { c: number }).c).toBe(0)
+      expect((migrated.db.prepare('SELECT COUNT(*) AS c FROM segments').get() as { c: number }).c).toBe(0)
+      expect((migrated.db.prepare('SELECT COUNT(*) AS c FROM segments_fts').get() as { c: number }).c).toBe(0)
+      // 同库补写一行，关库重开（同串）：不再触发二次清空
+      migrated.replaceSession(projection, 10, 20)
+    } finally {
+      migrated.close()
+    }
+    const again = openProjectionStore(legacyDir)
+    try {
+      expect(again.summaries.size).toBe(1)
+    } finally {
+      again.close()
+    }
+    rmSync(legacyDir, { recursive: true, force: true })
   })
 })

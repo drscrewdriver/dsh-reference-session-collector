@@ -36,6 +36,7 @@ export { projectSessionEvents, extractSearchEventText, extractTitleFromEvents,
   type SessionProjection, type ProjectionSegment, type ProjectionReplace,
   type SessionSummary, type ProjectionOptions, type ExactCounter } from './projection.ts'
 export { segmentForIndex, segmentQueryTerm, sanitizeFtsQuery } from './segment.ts'
+export { stripInjectedBlocks, INJECTED_BLOCK_TAGS } from './strip-injected.ts'
 export { createQueryContext, status, listSessions, sessionDetail, surfaceLedger,
   recallReport, search, LedgerCache, LEDGER_LRU_CAP, type QueryContext } from './surface.ts'
 export { ProjectionSync, discoverSessionLogs, resolveDshHome, resolveIndexDir,
