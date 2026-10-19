@@ -115,6 +115,20 @@ describe('GET op 分发', () => {
     expect((await get('/api/dsh-reference-session')).statusCode).toBe(400)
   })
 
+  it('recall/surface 省 session 参数 → 自解析最活跃会话（CCI 无参臂契约，装机对练实锤）', async () => {
+    const r = await get('/api/dsh-reference-session?op=recall')
+    expect(r.statusCode).toBe(200)
+    const j = r.json()
+    expect(j.ok).toBe(true)
+    expect(j.resolved_session_id).toBe('s-route')
+    expect(j.resolved_by).toBe('latest')
+    const s = await get('/api/dsh-reference-session?op=surface')
+    expect(s.statusCode).toBe(200)
+    expect((s.json() as Record<string, unknown>).resolved_session_id).toBe('s-route')
+    // op=session 明细面仍需显式 session（不自解析）
+    expect((await get('/api/dsh-reference-session?op=session')).statusCode).toBe(400)
+  })
+
   it('非 trusted host → 403', async () => {
     const guarded: DrsHandlerDeps = { ...deps, trustedHosts: ['127.0.0.1:8080'] }
     const res = fakeRes()

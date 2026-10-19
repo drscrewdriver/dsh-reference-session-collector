@@ -135,6 +135,24 @@ export interface DrsHandlerDeps {
 }
 
 /**
+ * 省参自解析（CCI 无参臂契约）：max(last_time_ms) 的最活跃会话；
+ * 同刻按 synced_at 新者；空库返回 undefined（调用侧 400）。
+ */
+function resolveLatestSessionId(query: QueryContext): string | undefined {
+  let bestId: string | undefined
+  let bestTime = -1
+  let bestSync = ''
+  for (const row of query.store.summaries.values()) {
+    if (row.last_time_ms > bestTime || (row.last_time_ms === bestTime && row.synced_at > bestSync)) {
+      bestId = row.session_id
+      bestTime = row.last_time_ms
+      bestSync = row.synced_at
+    }
+  }
+  return bestId
+}
+
+/**
  * op 分发：GET `?op=…`；POST `{op:'sync'}` 触发后台同步。
  * 未知 op / 缺参 → 400（不留空壳）。
  */
@@ -197,19 +215,27 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
       return
     }
     case 'surface': {
-      if (sessionId === '') {
-        writeJson(res, 400, { ok: false, error: 'session parameter required' })
+      const sid = sessionId !== '' ? sessionId : resolveLatestSessionId(deps.query)
+      if (sid === undefined) {
+        writeJson(res, 400, { ok: false, error: 'session parameter required (no sessions to resolve)' })
         return
       }
-      writeJson(res, 200, { ok: true, ...surfaceLedger(deps.query, sessionId) })
+      const ledger = surfaceLedger(deps.query, sid)
+      writeJson(res, 200, sessionId !== ''
+        ? { ok: true, ...ledger }
+        : { ok: true, ...ledger, resolved_session_id: sid, resolved_by: 'latest' })
       return
     }
     case 'recall': {
-      if (sessionId === '') {
-        writeJson(res, 400, { ok: false, error: 'session parameter required' })
+      const sid = sessionId !== '' ? sessionId : resolveLatestSessionId(deps.query)
+      if (sid === undefined) {
+        writeJson(res, 400, { ok: false, error: 'session parameter required (no sessions to resolve)' })
         return
       }
-      writeJson(res, 200, { ok: true, ...recallReport(deps.query, sessionId) })
+      const report = recallReport(deps.query, sid)
+      writeJson(res, 200, sessionId !== ''
+        ? { ok: true, ...report }
+        : { ok: true, ...report, resolved_session_id: sid, resolved_by: 'latest' })
       return
     }
     case 'search': {
