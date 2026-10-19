@@ -178,3 +178,32 @@
 - **门禁**:pnpm check 全绿=10 文件 68 测试;装机 local.3 后路由 200 回归。
 - **计划文本修正**:T1.4 原描述「export {} 一行+注释」为误导源——占位
   半身的最小合法形态是 no-op apply,不是空模块。
+
+## 农场全版本冒烟轮(2026-10-20,local.3 × 保留场 8 线)
+
+| 线 | smoke | apply 真跑(库落地) | ops 级 probe |
+|---|---|---|---|
+| 0.1.0-rc.8 | ok | ✓ | status 200(5会话/20段)、search 200 |
+| 0.1.1-rc.2 | ok | ✓ | — |
+| 0.1.2-rc.1 | ok(修复后) | ✓ | — |
+| 0.1.5-rc.3 | ok(修复后) | ✓ | — |
+| 0.1.7-rc.2 | ok(补 bundles 后) | ✓ | status 200(11会话/157段,带 cookie) |
+| 0.2.0-rc.2 | desktop 通道 | — | 真实 desktop profile local.3 已装,GUI 已过 |
+| 0.2.1-rc.1 | ok | ✓ | — |
+| 0.2.1-rc.2 | ok | ✓ | status/search 200 |
+
+- **新坑实锤①(比旧 IGNORED_BUILDS 教训更黑)**:farm add 撞 builds 闸时
+  dependencies 写入成功但 **bundles 注册被回滚**——smoke 照样绿(插件根本
+  不在装载面),假绿陷阱;且重跑 add 走幂等捷径(deps 已存在)**永不补写
+  bundles**(0.1.7 线实测)。add 成功判据=deps+bundles 双查;缺 bundles 时
+  手动 push(npm 包名形态)。修复面:格子 profile pnpm-workspace.yaml
+  allowBuilds 补 protobufjs/better-sqlite3/node-pty 后 add 全绿。
+- **新坑实锤②(跨线访问差异)**:0.1.2+ 线宿主用 cookie 闸门守 **所有**
+  /api 路由(CCI 同闸,非 DRS 缺陷):无 cookie 401,?token= 引导换
+  set-cookie 后 200;GUI 内 fetch 自动带 cookie,跨仓接线不受影响。
+  0.2.1-rc.2/0.1.0/0.1.1 无此闸(裸 fetch 200)。
+- **沙盒内 tokenizer**:格子 projection.db 均 4KB 空图——沙盒会话语料
+  极少/无沙箱资产时 basis 面照常工作;真 ds-token 臂已在真实 desktop
+  profile 实锤(上轮 basis=ds-token)。
+- **结论**:engines.dsh 17 条声明在本农场可达的 8 线全部实证成立
+  (host 半装载/开库/路由三线形状一致);三仓接线可开工。
