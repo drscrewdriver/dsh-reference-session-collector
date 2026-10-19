@@ -12,7 +12,7 @@ const disposers: Array<() => void> = []
 const dirs: string[] = []
 
 /** webServer.register 入参形状（断言用窄化面）。 */
-interface RegisteredRoute { kind: string; path: string }
+interface RegisteredRoute { kind: string; path: string; handler?: (req: unknown, res: unknown) => unknown }
 
 function freshCtx(webServer?: unknown) {
   const dir = mkdtempSync(join(tmpdir(), 'drs-reg-'))
@@ -89,5 +89,36 @@ describe('双通道路由注册', () => {
     expect(() => apply(ctx)).not.toThrow()
     expect(injectArms).toHaveLength(1)
     expect(() => injectArms[0]?.({ webServer: {} })).not.toThrow()
+  })
+
+  it('装机回归（宿主实锤）：ctx.get 对未声明服务抛 → 路由仍注册且请求 200 不跌 400', async () => {
+    let handler: ((req: unknown, res: unknown) => Promise<unknown>) | undefined
+    const register = vi.fn((route: RegisteredRoute) => {
+      handler = route.handler as (req: unknown, res: unknown) => Promise<unknown>
+      return vi.fn()
+    })
+    const dir = mkdtempSync(join(tmpdir(), 'drs-hostile-'))
+    dirs.push(dir)
+    process.env['DSH_REFERENCE_SESSION_DIR'] = dir
+    const offs: Array<() => void> = []
+    const hostile = {
+      get: (name: string) => {
+        if (name === 'webServer') return { register }
+        throw new Error(`service '${name}' is not injected`)
+      },
+      inject: () => {},
+      effect: (fn: () => void | (() => void)) => {
+        const off = fn()
+        if (typeof off === 'function') offs.push(off)
+      },
+    }
+    apply(hostile as unknown as Parameters<typeof apply>[0])
+    expect(register).toHaveBeenCalledTimes(1)
+    expect(handler).toBeDefined()
+    const res = { statusCode: 0, body: '', writeHead(code: number) { res.statusCode = code }, end(data: string) { res.body = data } }
+    const req = { method: 'GET', url: '/api/dsh-reference-session?op=status', headers: { host: '127.0.0.1:3080' } }
+    await expect(handler!(req, res)).resolves.toBeUndefined()
+    expect(res.statusCode).toBe(200)
+    while (offs.length > 0) offs.pop()?.()
   })
 })

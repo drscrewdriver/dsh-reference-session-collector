@@ -231,6 +231,16 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
   }
 }
 
+/** cordis 对未声明 inject 的服务 `ctx.get` 可能抛——读面一律安全包裹（装机实锤：
+ * 请求期未保护 get('webStartup') 抛异常→webServer 全局兑底 400 空体）。 */
+function safeGetService(ctx: Context, name: string): unknown {
+  try {
+    return typeof ctx.get === 'function' ? ctx.get(name) : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * 插件主体：开库 → 装配 sync（启动延迟首轮 + interval 轮）→ 双通道注册路由。
  * @param ctx - host 插件上下文（webServer 声明注入；webStartup/webRuntime 回退臂）。
@@ -293,11 +303,11 @@ export function apply(ctx: Context): void {
     }
   }, 'dsh-reference-session: projection lifecycle')
 
-  // trustedHosts best-effort（双名回退链；缺席=放行）。
+  // trustedHosts best-effort（双名回退链，全部 safe-get；缺席=放行）。
   const readStartupFace = (): WebStartupLike | undefined => {
     const direct = (ctx as unknown as { webStartup?: WebStartupLike }).webStartup
-      ?? (typeof ctx.get === 'function' ? ctx.get('webStartup') as WebStartupLike | undefined : undefined)
-      ?? (typeof ctx.get === 'function' ? ctx.get('webRuntime') as WebStartupLike | undefined : undefined)
+      ?? safeGetService(ctx, 'webStartup')
+      ?? safeGetService(ctx, 'webRuntime')
     return direct !== null && typeof direct === 'object' ? direct as WebStartupLike : undefined
   }
 
@@ -336,7 +346,7 @@ export function apply(ctx: Context): void {
 
   const readService = (name: string): unknown =>
     (ctx as unknown as Record<string, unknown>)[name]
-    ?? (typeof ctx.get === 'function' ? ctx.get(name) : undefined)
+    ?? safeGetService(ctx, name)
 
   const active = asWebServer(readService('webServer'))
   if (active !== undefined) {
