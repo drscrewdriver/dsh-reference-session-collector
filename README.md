@@ -26,6 +26,16 @@ session file; its only writes land in its own data directory.
 | steward（会话管家） | 内容搜索语料源切换（search_text/time/on_surface 检索面） | 二期 |
 | prime-memory | 历史投影只读：`op=session&turn=` 锚点回填 l0 旧行 turn/step（l0 写路径不迁） | 三期 |
 
+## 状态 / Status
+
+**已交付（v0.1.0）**：宿主半身全量——纯投影核心、SQLite 投影库
+（node:sqlite, FTS5）、增量同步引擎（watermark 预查/归档集跟随/interval
+调度）、三层缓存查询面、fenced HTTP 路由；门禁链 `pnpm check` 全绿
+（9 测试文件 / 66 测试）含 dist 冒烟。**剩余**：消费方接线（一期 CCI
+对账 / 二期 steward 语料切换 / 三期 memory 锚点回填）与效率基准 T9.1。
+
+其余 8 语文档：README.en / ja / ko / de / es / fr / ru / it。
+
 ## 架构
 
 ```

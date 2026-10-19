@@ -48,8 +48,8 @@
                           projection.db(四表+fts5,+缓存三层)
                                    │
               ┌────────────────────┼───────────────────┐
-   /api/dsh-reference-session     CCI(一期)      steward(二期)/memory(三期)
-   (status/surface/recall/…)     monitor 对账      语料源/写路径
+   /api/dsh-reference-session     cci(一期)      steward(二期)/memory(三期)
+   (status/surface/recall/…)     monitor 对账      语料源/历史回填
 ```
 
 ### DDL(spec 级完整定义;实现在 `src/schema.ts`)

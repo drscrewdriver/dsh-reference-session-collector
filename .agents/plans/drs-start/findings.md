@@ -137,3 +137,30 @@
   干地并行;T7.0 对照表本轮未回写(用户删除了 fork 旧版;开工 T7.1 前按当前
   代码重推,事实基线:title 已由 extractTitleFromEvents 落 summary.title,
   旧 gap-1 不成立)。
+
+## 二期接线事实(T7.0 对照表 + steward drs-corpus 分支,2026-10-19)
+
+**T7.0 字段对照表(DRS wire → steward 引擎列;阻塞项核对=齐备,已实现)**
+
+| steward 列 | DRS 来源 | 说明 |
+|---|---|---|
+| docs.session_id | 请求参数 session(回显) | 检索臂行不含 session_id,由头部行补 |
+| docs.seq | rows[].seq | |
+| docs.type | rows[].kind | 同一事件类型词表,TYPE_WEIGHT/类型过滤不变 |
+| docs.surface | rows[].on_surface | 1→'current' / 0→'shadowed';检索域仍只搜 current |
+| docs.time | rows[].time | per-doc 时间 |
+| docs.text | rows[].search_text | DRS 视界=steward 抽取超集(tool/call args+todo/write+turn/end 错误)→ 命中面只宽不窄 |
+| docs.index_text | segmentForIndex(search_text) | steward 自有切分面不动,引擎重算 |
+| sessions.version | sessions.artifact_mtime_ms | 水位代理:日志重写必 bump mtime;首次切源全量重灌一轮(version 整数 vs mtime 毫秒不同域,有意代价) |
+| sessions.updated_at | sessions.last_time_ms | 日期过滤/时间排序键 |
+| sessions.title/cwd/archived | sessions 同名列 | 标题空串保留旧行(CASE);archived 插行即带 + setArchived 双保险 |
+
+缺口记录:检索臂行不含 role(steward docs 无此列,不需要);DRS 信任门为精确匹配,
+steward 侧以 Host 头回显首个 trustedHosts 条目对齐(条目省略端口时 URL 带端口会失配)。
+
+**steward 侧落地(分支 drs-corpus,commit b90def4)**:engine.upsertSessionDocs(docs
+直插面,fts 外部内容表手动同步复用原范式)· host/index/drs-source.ts(HTTP 客户端)
+· sync.ts 第 7 构造参 SwitchDrsCorpusSource 端口 + runDrsPass + 整轮回退原生链路 ·
+config corpusSource('native' 缺省)/drsBaseUrl(volatile 探针式 schema 同步)·
+tests/drs-corpus.spec.ts —— steward 全套 224/224 绿、typecheck 干净。
+真机半(T7.2 新鲜度≤1 分钟)待 DRS 装机后验收。

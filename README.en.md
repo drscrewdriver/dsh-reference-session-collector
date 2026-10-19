@@ -14,11 +14,14 @@ projection instead of each decoding logs on their own.
 
 ## Status
 
-**Work in progress.** Delivered: package skeleton, vendored decode/tokenizer
-leaves, incremental sync engine (watermark pre-check, archive-set following,
-interval scheduling; 14/14 unit tests green). In progress: projection core and
-SQLite persistence (L1), query face and caching (L2), host half and HTTP routes
-(L4). The route table and store schema below are **finalized design**.
+**Delivered (v0.1.0)**: the whole host half — pure projection core, SQLite
+projection store (node:sqlite, FTS5), incremental sync engine (watermark
+pre-check, archive-set following, interval scheduling), query surface with
+3-layer caching, and the fenced HTTP route. Gate chain `pnpm check` green
+(9 suites / 66 tests) plus dist smoke (`pnpm smoke`). **Remaining**: consumer
+wiring (phase 1 CCI reconciliation, phase 2 steward corpus switch, phase 3
+memory anchor backfill) and the efficiency benchmark (T9.1). The route table
+and store schema below are finalized.
 
 ## Architecture
 
@@ -43,7 +46,7 @@ SQLite persistence (L1), query face and caching (L2), host half and HTTP routes
 - **Three cache layers**: SQLite mmap/WAL always on; sessions aggregates
   resident in memory; per-session ledger LRU keyed by sync generation.
 
-## HTTP route (finalized design)
+## HTTP route
 
 Single fenced route, op dispatch:
 
@@ -96,10 +99,7 @@ No settings face yet (lands with phase-2 wiring). Environment variables:
 
 ```bash
 pnpm install
-pnpm typecheck   # tsc --noEmit
-pnpm lint        # eslint
-pnpm test        # vitest run
-pnpm build       # tsdown → lib/
+pnpm check       # typecheck → lint → test → build → smoke (one chain)
 ```
 
 Plan and progress: `.agents/plans/drs-start/` (spec / findings / checklist /
