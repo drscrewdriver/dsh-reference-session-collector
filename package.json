@@ -1,6 +1,6 @@
 {
   "name": "dsh-reference-session",
-  "version": "0.1.0-local.6",
+  "version": "0.1.0-local.7",
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
     "tag": "latest",

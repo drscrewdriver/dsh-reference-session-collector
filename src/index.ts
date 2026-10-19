@@ -20,6 +20,7 @@ import {
   listSessions,
   recallReport,
   search,
+  searchGrouped,
   sessionDetail,
   status,
   surfaceLedger,
@@ -38,7 +39,8 @@ export { projectSessionEvents, extractSearchEventText, extractTitleFromEvents,
 export { segmentForIndex, segmentQueryTerm, sanitizeFtsQuery } from './segment.ts'
 export { stripInjectedBlocks, INJECTED_BLOCK_TAGS } from './strip-injected.ts'
 export { createQueryContext, status, listSessions, sessionDetail, surfaceLedger,
-  recallReport, search, LedgerCache, LEDGER_LRU_CAP, type QueryContext } from './surface.ts'
+  recallReport, search, searchGrouped, buildSearchSnippet, LedgerCache, LEDGER_LRU_CAP,
+  type QueryContext, type GroupedSearchRequest, type GroupedSearchHit } from './surface.ts'
 export { ProjectionSync, discoverSessionLogs, resolveDshHome, resolveIndexDir,
   resolveExactCounter, readArchivedSessionIds, startIntervalSync, resolveSyncIntervalMs,
   DEFAULT_SYNC_INTERVAL_MS, SYNC_INTERVAL_ENV, DISCOVERY_LIMIT,
@@ -243,6 +245,28 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
       const q = url.searchParams.get('q') ?? ''
       if (q === '') {
         writeJson(res, 400, { ok: false, error: 'q parameter required' })
+        return
+      }
+      // 分组臂（steward 直连）：group=session 时走 searchGrouped，参数见
+      // GroupedSearchRequest；缺省仍为逐文档平铺命中（CCI/既有调用不变）。
+      if (url.searchParams.get('group') === 'session') {
+        const kindsRaw = url.searchParams.get('kinds') ?? ''
+        const archivedRaw = url.searchParams.get('archived')
+        const fromRaw = url.searchParams.get('from')
+        const toRaw = url.searchParams.get('to')
+        const limitRaw = url.searchParams.get('limit')
+        const grouped = searchGrouped(deps.query, {
+          query: q,
+          ...(kindsRaw === '' ? {} : { kinds: kindsRaw.split(',').map(k => k.trim()).filter(Boolean) }),
+          ...(archivedRaw === 'active' || archivedRaw === 'archived' || archivedRaw === 'all'
+            ? { archived: archivedRaw } : {}),
+          ...(fromRaw !== null && Number.isFinite(Number(fromRaw)) ? { from: Number(fromRaw) } : {}),
+          ...(toRaw !== null && Number.isFinite(Number(toRaw)) ? { to: Number(toRaw) } : {}),
+          ...(url.searchParams.get('surface') === '0' ? { surfaceOnly: false } : {}),
+          ...(url.searchParams.get('sort') === 'time' ? { sortBy: 'time' as const } : {}),
+          ...(limitRaw !== null && Number.isFinite(Number(limitRaw)) ? { limit: Number(limitRaw) } : {}),
+        })
+        writeJson(res, 200, { ok: true, ...grouped })
         return
       }
       const limitRaw = url.searchParams.get('limit')

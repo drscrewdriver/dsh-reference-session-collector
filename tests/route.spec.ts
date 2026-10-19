@@ -108,6 +108,24 @@ describe('GET op 分发', () => {
     expect((res.json().hits as unknown[]).length).toBeGreaterThan(0)
   })
 
+  it('search group=session 分组臂 → 200，命中行携会话级字段（steward 直连契约）', async () => {
+    const res = await get('/api/dsh-reference-session?op=search&group=session&q=搜索标记词&archived=all&sort=time')
+    expect(res.statusCode).toBe(200)
+    const j = res.json()
+    const hits = j.hits as Record<string, unknown>[]
+    expect(hits.length).toBeGreaterThan(0)
+    expect(hits[0]?.['session_id']).toBe('s-route')
+    expect(String(hits[0]?.['seq'])).toBe('1')
+    expect(hits[0]?.['type']).toBe('user/message')
+    expect(hits[0]).toHaveProperty('updated_at')
+    expect(hits[0]).toHaveProperty('snippet')
+    // 节选锚定在查询词上（非头部截断）
+    expect(String(hits[0]?.['snippet'])).toContain('搜索标记词')
+    // kinds 非法展开：显式 tool 类零命中（种子无 tool 行）
+    const none = await get('/api/dsh-reference-session?op=search&group=session&q=搜索标记词&kinds=' + encodeURIComponent('tool/call'))
+    expect(((none.json() as Record<string, unknown>).hits as unknown[]).length).toBe(0)
+  })
+
   it('缺 session/q 参数 → 400；未知 op → 400', async () => {
     expect((await get('/api/dsh-reference-session?op=session')).statusCode).toBe(400)
     expect((await get('/api/dsh-reference-session?op=search')).statusCode).toBe(400)

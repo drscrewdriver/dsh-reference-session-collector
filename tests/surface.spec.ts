@@ -18,6 +18,8 @@ import {
   listSessions,
   recallReport,
   search,
+  searchGrouped,
+  buildSearchSnippet,
   sessionDetail,
   status,
   surfaceLedger,
@@ -295,5 +297,76 @@ describe('search(中英同构切词)', () => {
     const report = search(ctx, '   ')
     expect(report.match).toBe('')
     expect(report.hits).toEqual([])
+  })
+})
+
+describe('searchGrouped(分组臂：steward 检索语义直译)', () => {
+  // 库态（重同步改写后）：s1{seq1 user/on1, seq2 tool-result/on1, seq3 assistant/on0,
+  // seq5, seq6 system} + s2{seq1 user/on1}；sessions.last_time s1=1005、s2=100。
+  it('缺省 kinds=user+assistant 且仅表面：会话分组各取最强命中', () => {
+    const report = searchGrouped(ctx, { query: '投影' })
+    const keys = report.hits.map(hit => `${hit.session_id}#${hit.seq}`)
+    // s1#3 已 shadowed（on_surface=0）不入候选；s1 取 seq1，s2 取 seq1
+    expect(keys).toEqual(expect.arrayContaining(['s1#1', 's2#1']))
+    expect(keys).not.toContain('s1#3')
+    // 标题/时间面携回（steward 命中行 join s.title 同形）
+    expect(report.hits.find(hit => hit.session_id === 's1')?.title).toBe('投影同步器演示')
+  })
+
+  it('kinds 展开面：英文词只在 tool/result 时，默认 kinds 零命中、显式 kinds 可中', () => {
+    expect(searchGrouped(ctx, { query: 'PROJECTION' }).hits).toEqual([])
+    const widened = searchGrouped(ctx, { query: 'PROJECTION', kinds: ['user/message', 'assistant/message', 'tool/result'] })
+    const keys = widened.hits.map(hit => `${hit.session_id}#${hit.seq}`)
+    expect(keys).toEqual(['s1#2'])
+    expect(widened.hits[0]?.type).toBe('tool/result')
+  })
+
+  it('archived 域切换：s2 归档后 active 臂不含、archived 臂独有', () => {
+    store.setArchived('s2', 1)
+    try {
+      expect(searchGrouped(ctx, { query: '投影', archived: 'active' }).hits.map(h => h.session_id)).toEqual(['s1'])
+      const only = searchGrouped(ctx, { query: '投影', archived: 'archived' }).hits
+      expect(only.map(h => h.session_id)).toEqual(['s2'])
+      expect(searchGrouped(ctx, { query: '投影', archived: 'all' }).hits).toHaveLength(2)
+    } finally {
+      store.setArchived('s2', 0)
+    }
+  })
+
+  it('日期半开区间 [from,to) 键在会话末时间：s2(100) 被 [1000,2000) 排除', () => {
+    const ids = searchGrouped(ctx, { query: '投影', from: 1000, to: 2000 }).hits.map(h => h.session_id)
+    expect(ids).toEqual(['s1'])
+  })
+
+  it('sortBy=time 键在 updated_at 降序（非命中 time）', () => {
+    const ids = searchGrouped(ctx, { query: '投影', sortBy: 'time' }).hits.map(h => h.session_id)
+    expect(ids).toEqual(['s1', 's2'])
+  })
+
+  it('surface=0 放开阴影行：命中集可能变宽且不抛', () => {
+    const open = searchGrouped(ctx, { query: '投影', surfaceOnly: false, kinds: ['user/message', 'assistant/message'] })
+    expect(open.hits.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('buildSearchSnippet(锚定节选)', () => {
+  it('短文本直返 flatten 全文', () => {
+    expect(buildSearchSnippet('一段  很\n短的文本', '短')).toBe('一段 很 短的文本'.replace(/\s+/g, ' '))
+  })
+
+  it('长文本窗口居查询词首现处，前后加省略号且限长 240', () => {
+    const filler = 'x'.repeat(300)
+    const text = `${filler} 关键词正文 ${filler}`
+    const out = buildSearchSnippet(text, '关键词正文')
+    expect(out.length).toBeLessThanOrEqual(240)
+    expect(out).toContain('关键词正文')
+    expect(out.startsWith('…')).toBe(true)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
+  it('无锚点退化为头部 240+省略号（steward 同形：slice(0,max) 后再加 …）', () => {
+    const text = 'y'.repeat(400)
+    const out = buildSearchSnippet(text, '查不到的词')
+    expect(out).toBe(`${'y'.repeat(240)}…`)
   })
 })
