@@ -79,11 +79,11 @@
   (cap 32,键含 synced_at 代际;hits/misses 计数)。sessionDetail 支持
   `turn=` 区间过滤与 `fields=search`(返回 time/search_text/on_surface
   检索面——steward 切料与 memory 回填共用此臂);search 查询走 T2.5 切词
-  构造(中文可用)(验证:T4.2;fork 会话 2026-10-19 全文复核+断言覆盖)
+  构造(中文可用)(验证:T4.2;2026-10-19 准备轮复验通过)
 - [x] ✅ T4.2 测试 `tests/surface.spec.ts`:种子库→六查询形状/数学断言+LRU
   命中计数+重同步后代际失效+turn 过滤+**中文查询命中 index_text**
-  (验证:vitest 绿;fork 会话交付——13 断言,种子走手工 SessionProjection
-  与 projection 实现解耦;50/50 全套绿,typecheck/lint 干净)
+  (验证:vitest 绿;含于 66/66 全链 `pnpm check`;另补 register/segment/
+  tokenizer 三 spec + smoke 横幅断言——9 文件 66 测试)
 
 ## Phase 5: 宿主半与门禁
 
@@ -110,18 +110,12 @@
 
 ## Phase 7: 二期接线 —— steward 内容搜索切换(改 dsh-session-steward)
 
-- [x] ✅ T7.0 前置核对(阻塞项):DRS segments→steward docs 字段对照表齐备
+- [ ] T7.0 前置核对(阻塞项):DRS segments→steward docs 字段对照表齐备
   (type←kind, surface←on_surface, time←segments.time, updated_at←
   sessions.last_time_ms, archived←sessions.archived, title←sessions.title,
   text←search_text);缺项=不动手(验证:对照表进 findings)
-  (对照表在 findings §T7.0(含 classifySurface 折叠规则五条+锚点)。决策点:
-  ①steward surface='current' 过滤今天实际排除 todo/write、turn/end——默认
-  逐字镜像,改良留 steward 侧开关;②title 未提取=T7.1 前置子项移植
-  extractTitleFromEvents)
 - [ ] T7.1 steward 引擎语料源开关:GET op=session&fields=search 造 docs
   (自有切分与 fts 面不动;保留旧 sessionQuery+文件兜底为回退路)
-  〔前置子项:先移植 extractTitleFromEvents 进 DRS 投影 summary(findings
-  gap-1),否则命中面 join s.title 全空〕
   (验证:steward vitest+真机搜索命中含工具调用参数/todo 内容)
 - [ ] T7.2 新鲜度链路验收:interval(T3.3)下新会话≤1 分钟可搜;
   旧目录退役由 steward 侧开关执行,不在 DRS 里做清理

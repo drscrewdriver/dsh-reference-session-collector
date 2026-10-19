@@ -118,43 +118,22 @@
 - **待定项**:T4.2 正式 surface.spec(L2)、T6+ 跨仓接线、T9.1 真机 perf;
   真机桌面 profile 装机未做(需先关停 Electron)。
 
-## T7.0 对照表(2026-10-19 二期前置核对;源码锚点=steward@0.5.5)
+## 三仓适配前准备轮(2026-10-19 晚，接 L1 完成后)
 
-steward docs 表(src/host/index/schema.ts ensureSchema)逐字段 ← DRS 来源:
-
-| steward 字段 | DRS 来源 | 语义对齐说明 |
-|---|---|---|
-| docs.session_id | segments.session_id | PK 同形(header.id,目录名兜底) |
-| docs.seq | segments.seq | PK(session_id,seq) 同形;唯一索引 docs_session_seq 同构 |
-| docs.type | segments.kind | 事件 type 原串,不翻译 |
-| docs.surface | segments.on_surface | 'current'/'shadowed' ↔ 1/0;**同视界=同算法**(见下折叠规则) |
-| docs.time | segments.time | 事件 epoch ms(buildIndexDocuments 缺 time 记 0) |
-| docs.text | segments.search_text | 检索视界=extractSessionEventText 同构(extract.ts:108-199) |
-| docs.index_text | segments_fts.index_text | segmentForIndex 同构(Intl.Segmenter('zh') word 级空格连接,extract.ts:73-95);索引/查询同函数 |
-| (无对应) | segments.text/tokens/turn/step/role/compressed/surface_*/replaced_by + replaces 表 | DRS 超集;text=CCI verify 口径(message.content 视界),与 search_text 并存正是设计意图;steward 不消费,无害 |
-
-steward sessions 表 ← DRS sessions:
-
-| steward 字段 | DRS 来源 | 说明 |
-|---|---|---|
-| session_id | sessions.session_id | 同形 |
-| version | ⚠ 无直接对应 | steward 增量水位列;T7.1 适配侧以 synced_at 代际或 artifact mtime 换算,不动 DRS schema |
-| title | sessions.title | ⚠ gap-1:DRS 不提取标题;补口=extractTitleFromEvents(extract.ts:28)同构移植进投影 summary,T7.1 前置子项 |
-| cwd | sessions.cwd | header.cwd |
-| updated_at | sessions.last_time_ms | 排序/日期过滤语义=会话末事件时间 ✓(engine.ts:511-531 半开区间) |
-| indexed_at | sessions.synced_at | ⚠ 类型差:steward INTEGER epoch vs DRS TEXT datetime;适配侧换算 |
-| archived | sessions.archived | ✓ 检索域成员标志 |
-
-折叠规则(classifySurface,extract.ts:219-246)——L1 projection 的 on_surface 逐字镜像:
-1. 参与类型仅四类:user/message、assistant/message、tool/call、tool/result;
-2. append/无 op → current(1) 入节点表;
-3. replace{startSeq,endSeq} → 只对**当前在面节点**落于闭区间者置 shadowed(0),replace 自身 current(1) 替换入节点表——不是「区间内全部 seq 置 0」;
-4. 未知 op 形状 → 降级 append;
-5. 非参与类型(todo/write、turn/end 虽产检索文本)不在 map → steward `?? 'shadowed'`(extract.ts:267)→ on_surface 镜像值=0。
-
-决策点(阻塞 T7.1,须用户拍板):
-- **mirror-vs-改良**:steward 今天 surface='current' 过滤实际把 todo/write、turn/end 排除在搜索外。默认逐字镜像(行为与 steward 现状逐行一致,继承排除);改良=改 steward 侧过滤子句,不动 DRS 存储语义,另行开关。
-- **gap-1(title)**:T7.1 开工前先移植 extractTitleFromEvents,否则命中面 join s.title 全空。
-- version/indexed_at 换算放 steward 适配层。
-
-结论:对照表齐备,无缺项阻塞;T7.0 解除阻塞。
+- **TDD 补口**:新增 register/segment/tokenizer 三 spec(双通道注册 direct+
+  inject+duplicate 容错+dispose 注销;切词尾前缀/引号结构不变式/多词 AND;
+  R5 真资产正负分支+resolveExactCounter 实词表命中);smoke 加 client 横幅
+  id==包名断言。门禁链固化为 `pnpm check`(typecheck→lint→test→build→smoke),
+  全绿=9 文件 66 测试。
+- **git 基线**:仓初建(main),root-commit `8020eb7` + tag `v0.1.0-baseline`;
+  42 文件入基线(无 node_modules/lib;*.tgz 已加 ignore)。
+- **tgz 实证**:`npm pack`(触发 prepack 重建)→ 23 文件/1.9MB;解包四文件
+  (lib/index.js、lib/client.js、dsh.plugin.json、cordis.patch.yml)SHA256
+  全部 MATCH 仓内;engines.dsh 仓↔包同串;client 横幅首行正常。
+- **npm 特性注意**:`files` 剔除 README.en.md 行仍会被打进包——npm 无条件
+  强含 README*/LICENSE/package.json;如需彻底排除只能删文件(未动,留用户裁)。
+- **下一闸(三仓支线并行开工前置仅剩)**:DRS tgz 装机(profile 改写+重启,
+  串行资源,装机前先关停 Electron)→ T6.x/T7.x/T8.x 三仓支线即可互不相
+  干地并行;T7.0 对照表本轮未回写(用户删除了 fork 旧版;开工 T7.1 前按当前
+  代码重推,事实基线:title 已由 extractTitleFromEvents 落 summary.title,
+  旧 gap-1 不成立)。
