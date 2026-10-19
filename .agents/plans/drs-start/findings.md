@@ -256,3 +256,18 @@
   drs-unavailable——修=同源转发请求 Host 头（getJson atHost 覆盖臂）。226/226。
 - **装机终验**：双 profile drs local.7+steward local.3，content-search ok=true
   items=5 全锚定无噪；status schema=3、47 会话/13957 段全量重建。
+
+## T7.4 定位臂轮（2026-10-20，B 路线 DOM 跳转）
+
+- **前提实证**：宿主前端无列表虚拟化（virtuoso/react-window 零指纹；
+  IntersectionObserver 仅 sticky 标题与入视口激活）——打开会话后历史行
+  全量在 DOM，「偏旧历史预渲染」需求不成立，只做找行+滚动。
+- **steward local.4/5（drs-corpus 3876f57+78ed350）**：src/client/search/
+  locate.ts——同源 GET op=session&session= 拿段行；needle 决策：
+  on_surface=0 放弃（GUI 不渲染替身原文）/compressed=1 用 surface_text/
+  普通行优先 search_text（注入已剥=可见文本面）；归一化抹空白+markdown
+  噪声两侧同式；MutationObserver 防抖轮询 5s；scrollIntoView(center)+
+  4s outline 高亮（data-dss-located 钩子）；全链静默退化。点击后收起
+  面板（遮罩挡滚动效果）。locate.spec 7 例+全量 233/233+client 套全绿。
+- **数据面预检真机 10/10 LOCATABLE**（needle 全部解析成功零跳过）；
+  GUI 目验待用户点击（ComputerUse 被浏览器 URL 置信策略挡住）。
