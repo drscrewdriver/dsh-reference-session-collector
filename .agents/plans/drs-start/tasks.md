@@ -120,6 +120,13 @@
 - [ ] T7.1 steward 引擎语料源开关:GET op=session&fields=search 造 docs
   (自有切分与 fts 面不动;保留旧 sessionQuery+文件兜底为回退路)
   (验证:steward vitest+真机搜索命中含工具调用参数/todo 内容)
+  【已被 T7.3 取代——用户裁定管家不自建索引,docs 重灌链路作废】
+- [x] ✅ T7.3 检索链路重排(2026-10-20,DRS local.6/7 × steward local.3):
+  DRS search_text 剥离 7 类宿主注入样板段(schema v3 重置重建)+
+  op=search&group=session 分组臂(steward engine.search 语义直译);
+  steward content-search 直连+同源 Host 转发,DRS 轮降级 header-only,
+  本地 docs/docs_fts 退役;硬依赖不回退(manifest 依赖声明留后续)
+  (验证:DRS 89/89、steward 226/226、真机 content-search items=5 全锚定无噪)
 - [ ] T7.2 新鲜度链路验收:interval(T3.3)下新会话≤1 分钟可搜;
   旧目录退役由 steward 侧开关执行,不在 DRS 里做清理
   (验证:真机新会话 1 分钟内命中)

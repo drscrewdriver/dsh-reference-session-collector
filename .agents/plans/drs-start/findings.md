@@ -234,3 +234,25 @@
   压缩被判 corrupt 直接拒 boot（首错即致命）——v0 行形状本身与 v3+
   同形（header 字段 id/cwd/createdAt 同源），仅帧封装/校验宽度不同。
   农场老格 fixture 制作纪律入档。
+
+## T7.3 直连轮（2026-10-20：节选对不上 → 检索链路重排）
+
+- **症状根因两桩**：①search_text 收了宿主注入样板段（真机取证：7 类标记、
+  1210/3100=39% 用户消息含注入，relevant-memories 747 次为最）——关键词命中
+  在记忆召回区，节选与用户正文对不上；②跳转=uiWorkspace.openSession(sessionId)
+  无 seq 定位参数（宿主接口面限制），点开只见会话头不见命中行——遗留项，
+  需宿主锚点或面板内定位方案。索引本体取证为干净库（integrity OK/零孤儿）。
+- **架构裁定（用户拍板）**：管家不再自建检索索引；DRS 设为硬依赖（永远在场，
+  缺席即搜索显式报错不回退）；manifest 级依赖声明留后续。
+- **DRS local.6/7**：strip-injected 七族成对剥离（反向引用配对，未闭合/异名
+  保留）只过 search_text，text/tokens CCI 口径不动（R5）；schema v3 断裂重置
+  （水位未变旧污染行永不重投，清空重建 47 会话实证）；op=search&group=session
+  分组臂=steward engine.search 语义直译（TYPE_WEIGHT 3/1、-rank×w 分组、
+  updated_at 时间排序、archived/from/to/surface 过滤、锚定 240 节选）。89/89。
+- **steward drs-corpus 2f59d6e+c24d32e（local.2/3）**：content-search 直连 DRS；
+  DRS 轮降级 header-only（engine.upsertSessionHead，docs/docs_fts 退役不新增，
+  存量行老化）；search-status available 由 DRS probe 裁决；corpusSource 缺省
+  drs。真机踩坑：宿主端口动态（3080），baseUrl 缺省猜 8080 → probe 假死
+  drs-unavailable——修=同源转发请求 Host 头（getJson atHost 覆盖臂）。226/226。
+- **装机终验**：双 profile drs local.7+steward local.3，content-search ok=true
+  items=5 全锚定无噪；status schema=3、47 会话/13957 段全量重建。
