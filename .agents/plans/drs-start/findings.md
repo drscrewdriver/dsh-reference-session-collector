@@ -161,3 +161,20 @@
 - **遗留**:仓根旧 `dsh-reference-session-0.1.0.tgz` 残留(DeleteFile 工具
   异常未删,gitignore 已挡,待手动清);desktop 宿主 GUI 未启动验证
   (装机+哈希已对,桌面端重启由用户触发);T9.1 二次同步耗时实测待跑。
+
+## client 半身 invalid plugin 实锤轮(2026-10-20,local.3)
+
+- **症状**:GUI 报 "Failed to load plugins — invalid plugin, expect
+  function or object with an 'apply' method, received object";刷新无效;
+  host 半路由 meanwhile 全 200(两个报错面无关,勿被路由绿误导)。
+- **根因**:client 占位半写成裸 `export {}` → CJS 工厂返回空对象 →
+  **client 半身同样经 cordis 插件加载器装载**(双半契约:两半都是插件,
+  形态必须 function 或 {apply};对照 steward src/client/index.ts 有
+  真实 `export function apply`)。
+- **修复**:client 半改为合法空插件(`export const inject=[]` +
+  `export function apply(): void {}`);新增 tests/client-shape.spec.ts
+  形态断言 + smoke 对 lib/client.js 产物含 apply 的文本断言(两道网);
+  双清单同步 0.1.0-local.3(store 钉版纪律)。
+- **门禁**:pnpm check 全绿=10 文件 68 测试;装机 local.3 后路由 200 回归。
+- **计划文本修正**:T1.4 原描述「export {} 一行+注释」为误导源——占位
+  半身的最小合法形态是 no-op apply,不是空模块。

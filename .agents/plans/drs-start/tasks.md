@@ -32,7 +32,10 @@
   ModuleLoader 横幅)(验证:tsc -p --noEmit 空项目通过)
 - [x] ✅ T1.4 `eslint.config.js`(抄 CCI 精简版)+ `vitest.config.ts`
   (node,include tests/**/*.spec.ts)+ `src/client/index.ts` 占位
-  (export {} 一行 + 注释)(验证:两工具空跑通过)
+  (合法空插件形态:`export const inject: string[]=[]` +
+  `export function apply(): void {}`——装机实锤修正:裸 `export {}` 会触发
+  宿主 invalid plugin,client 半身同样经 cordis 加载器装载)(验证:两工具空跑通过
+  +client-shape 断言+smoke 产物 apply 面断言)
 - [x] ✅ T1.5 `README.md`(中英:定位/架构图/路由表/只读纪律/分期路线)
 
 ## Phase 2: 投影核心
@@ -110,41 +113,26 @@
 
 ## Phase 7: 二期接线 —— steward 内容搜索切换(改 dsh-session-steward)
 
-- [x] ✅ T7.0 前置核对(阻塞项):DRS segments→steward docs 字段对照表齐备
+- [ ] T7.0 前置核对(阻塞项):DRS segments→steward docs 字段对照表齐备
   (type←kind, surface←on_surface, time←segments.time, updated_at←
   sessions.last_time_ms, archived←sessions.archived, title←sessions.title,
   text←search_text);缺项=不动手(验证:对照表进 findings)
-  → 2026-10-19 fork 核对齐备并落 findings(补 version←artifact_mtime_ms
-  水位代理、Host 头回显两条缺口记录)
-- [x] ✅ T7.1 steward 引擎语料源开关:GET op=session&fields=search 造 docs
+- [ ] T7.1 steward 引擎语料源开关:GET op=session&fields=search 造 docs
   (自有切分与 fts 面不动;保留旧 sessionQuery+文件兜底为回退路)
   (验证:steward vitest+真机搜索命中含工具调用参数/todo 内容)
-  → 2026-10-19 steward 分支 drs-corpus(commit b90def4)实现+vitest 全绿
-  (224/224,含工具调用参数/todo 命中断言);真机半待 DRS 装机后随 T7.2 验
 - [ ] T7.2 新鲜度链路验收:interval(T3.3)下新会话≤1 分钟可搜;
   旧目录退役由 steward 侧开关执行,不在 DRS 里做清理
   (验证:真机新会话 1 分钟内命中)
 
 ## Phase 8: 三期接线 —— memory 历史投影只读(改 dsh-prime-memory)
 
-- [x] ✅ T8.1 语义更正落档:l0 写路径保持 memory 自有(清洗/脱敏/record_id
+- [ ] T8.1 语义更正落档:l0 写路径保持 memory 自有(清洗/脱敏/record_id
   不迁),DRS 仅作历史投影只读源(spec R8 三期已改定;本项=确认计划文本
   无残留「l0 写 DRS」表述)
-  (spec 架构图唯一残留「语料源/写路径」已改「语料源/历史回填」;grep 复核
-  全计划仅存「不迁 DRS/语义互斥」表述)
-- [x] ✅ T8.2 memory 历史锚点回填:读 DRS op=session&turn= 按
+- [ ] T8.2 memory 历史锚点回填:读 DRS op=session&turn= 按
   (session_id, turn, role, 时间窗)匹配补 l0 旧行 turn/step;匹配不上
   留 NULL 不伪造(对齐 sqlite.ts:591-599 纪律);一次性任务+dry-run 报告
   (验证:抽检脚本;回填前后行数不变仅列填充)
-  (分支 dsh-prime-memory@feat/drs-anchor-backfill,未提交。交付:
-  src/drs-anchor-backfill.ts 纯核心(同窗多 turn=歧义放弃;UPDATE 恒带
-  `AND turn IS NULL` 已锚定行永不覆盖;行数不变式对账)+
-  scripts/drs-anchor-backfill.mjs CLI(wing-migrate 同款:dry-run 缺省/
-  --apply/--sample 证据行)+ tests/drs-anchor-backfill.test.ts 5 例。
-  门禁:typecheck 三配置绿/lint 0 错/全量 161 文件 1635 测试绿;CLI 真跑
-  冒烟 dry-run 报告 + apply applied=1 rows 2→2 invariant=OK,放弃行保持
-  NULL。DRS 来源=projection.db segments 只读直连(与 op=session 检索面
-  同字段),离线可跑)
 - [ ] T8.3 (独立可选,不卡三期)DRS 增 vec 列+BGE-M3 int8 填充批任务
   (可选依赖,缺资产跳过;embedding_meta 记模型/revision/维度)
   (验证:余弦冒烟=实验台口径)
