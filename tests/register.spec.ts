@@ -91,7 +91,7 @@ describe('双通道路由注册', () => {
     expect(() => injectArms[0]?.({ webServer: {} })).not.toThrow()
   })
 
-  it('装机回归（宿主实锤）：ctx.get 对未声明服务抛 → 路由仍注册且请求 200 不跌 400', async () => {
+  it('装机回归（宿主实锤）：未声明服务面访问（属性读+ctx.get）全抛 → 路由仍注册且请求 200', async () => {
     let handler: ((req: unknown, res: unknown) => Promise<unknown>) | undefined
     const register = vi.fn((route: RegisteredRoute) => {
       handler = route.handler as (req: unknown, res: unknown) => Promise<unknown>
@@ -101,7 +101,7 @@ describe('双通道路由注册', () => {
     dirs.push(dir)
     process.env['DSH_REFERENCE_SESSION_DIR'] = dir
     const offs: Array<() => void> = []
-    const hostile = {
+    const base = {
       get: (name: string) => {
         if (name === 'webServer') return { register }
         throw new Error(`service '${name}' is not injected`)
@@ -112,12 +112,22 @@ describe('双通道路由注册', () => {
         if (typeof off === 'function') offs.push(off)
       },
     }
+    // cordis Context 的 Proxy 形态：允许声明面与基础设施键，其余服务读即抛
+    const allowed = new Set(['get', 'inject', 'effect', 'logger', 'webServer'])
+    const hostile = new Proxy(base, {
+      get(target, prop) {
+        if (typeof prop === 'symbol' || allowed.has(prop)) {
+          return prop === 'webServer' ? { register } : Reflect.get(target, prop)
+        }
+        throw new Error(`service '${String(prop)}' is not injected`)
+      },
+    })
     apply(hostile as unknown as Parameters<typeof apply>[0])
     expect(register).toHaveBeenCalledTimes(1)
     expect(handler).toBeDefined()
     const res = { statusCode: 0, body: '', writeHead(code: number) { res.statusCode = code }, end(data: string) { res.body = data } }
     const req = { method: 'GET', url: '/api/dsh-reference-session?op=status', headers: { host: '127.0.0.1:3080' } }
-    await expect(handler!(req, res)).resolves.toBeUndefined()
+    await handler?.(req, res)
     expect(res.statusCode).toBe(200)
     while (offs.length > 0) offs.pop()?.()
   })

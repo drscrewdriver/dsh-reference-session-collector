@@ -231,9 +231,14 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
   }
 }
 
-/** cordis 对未声明 inject 的服务 `ctx.get` 可能抛——读面一律安全包裹（装机实锤：
- * 请求期未保护 get('webStartup') 抛异常→webServer 全局兑底 400 空体）。 */
-function safeGetService(ctx: Context, name: string): unknown {
+/** cordis 对未声明 inject 的服务面访问（属性读与 ctx.get）都会抛——两层安全
+ * 包裹（装机实锤×2：请求期未保护读 webStartup/webRuntime → webServer 全局
+ * 兑底 400 空体；Proxy 属性读臂同样需要 try）。 */
+function safeReadService(ctx: Context, name: string): unknown {
+  try {
+    const direct = (ctx as unknown as Record<string, unknown>)[name]
+    if (direct !== undefined) return direct
+  } catch { /* Proxy 面：未声明服务属性读抛 */ }
   try {
     return typeof ctx.get === 'function' ? ctx.get(name) : undefined
   } catch {
@@ -303,11 +308,9 @@ export function apply(ctx: Context): void {
     }
   }, 'dsh-reference-session: projection lifecycle')
 
-  // trustedHosts best-effort（双名回退链，全部 safe-get；缺席=放行）。
+  // trustedHosts best-effort（双名回退链，属性/get 两层 safe；缺席=放行）。
   const readStartupFace = (): WebStartupLike | undefined => {
-    const direct = (ctx as unknown as { webStartup?: WebStartupLike }).webStartup
-      ?? safeGetService(ctx, 'webStartup')
-      ?? safeGetService(ctx, 'webRuntime')
+    const direct = safeReadService(ctx, 'webStartup') ?? safeReadService(ctx, 'webRuntime')
     return direct !== null && typeof direct === 'object' ? direct as WebStartupLike : undefined
   }
 
@@ -344,9 +347,7 @@ export function apply(ctx: Context): void {
     }
   }
 
-  const readService = (name: string): unknown =>
-    (ctx as unknown as Record<string, unknown>)[name]
-    ?? safeGetService(ctx, name)
+  const readService = (name: string): unknown => safeReadService(ctx, name)
 
   const active = asWebServer(readService('webServer'))
   if (active !== undefined) {
