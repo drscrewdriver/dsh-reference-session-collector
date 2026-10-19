@@ -208,3 +208,29 @@
   desktop profile 实锤（上轮 basis=ds-token）。
 - **结论**:engines.dsh 17 条声明在本农场可达的 8 线全部实证成立
   (host 半装载/开库/路由三线形状一致);三仓接线可开工。
+
+## 格式代次按版本判断处理轮(2026-10-20,local.4)
+
+- **用户提问命中的真雷**:上一轮农场取证——0.1.0-rc.8/0.1.1-rc.2/0.1.2-rc.1
+  格沙盒语料 header 代次=**0**（老宿主自写代次），而 DRS 放行集只有
+  {3,4} → 三格 36/32/4 个会话**全部软跳＝老线整库静默不投**；smoke 绿
+  掩盖了它（软跳不是错）。
+- **代次语义取证**（当前 CLI 树迁移包）：v0→v1=**恒等边**（事件 type 体系
+  v0..v4 同形）；v2→v3/v3→v4 才是字段级重写（迁移=宿主职责，DRS 只读
+  不迁移）；官方解码器软加载臂在老格不可达（profile 树无
+  @deepseek-ai/dsh-session）→本地叶子是唯一解码面。
+- **处置**：放行集扩为 0..4（仍按文件头自声明判，不猜宿主版本；>4
+  照旧软跳+warn）；sessions 新增 **format_generation** 列（schema v2，
+  旧库 PRAGMA 探测+ALTER 就地迁移）；status 暴露 generations 分布哨兵；
+  形状对不上的老代块→text/search_text 自然为空不落行，永不伪造。
+- **实证链**：①单测（projection 透传/sync 0-1-2 放行/99 仍跳/e2e 真库
+  round-trip）；②0.1.0 格真 v0 样料（逐行帧流 zstd）起宿主 probe：
+  v0 会话 0→**37** 全入库，gen=0、basis=**ds-token**（老线原生 tokenizer
+  可用）、assistant/message text=27 全形投影（恒等边实证）、检索命中；
+  ③真实 web 宿主 local.4：schema=2 迁移无损，存量 46 行 gen=-1（水位
+  命中不重写＝设计正确，会话变更时自然补齐）。
+- **额外跨线发现（样料制作三轮才合规）**：0.1.0 线宿主 zstd 日志=
+  **每行一帧的帧流**且启动校验「首帧恰为一 header 行」，整文件单帧
+  压缩被判 corrupt 直接拒 boot（首错即致命）——v0 行形状本身与 v3+
+  同形（header 字段 id/cwd/createdAt 同源），仅帧封装/校验宽度不同。
+  农场老格 fixture 制作纪律入档。
