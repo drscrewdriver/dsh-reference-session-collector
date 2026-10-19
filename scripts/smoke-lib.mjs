@@ -27,5 +27,9 @@ const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'
 if (!client.includes('window.__ModuleLoader__.load') || !client.includes('"dsh-reference-session"')) {
   throw new Error('client banner missing ModuleLoader.load or wrong id')
 }
+// 装机实锤回归：client 产物必须暴露 apply（空对象会触发宿主 invalid plugin）
+if (!/\bapply\b/u.test(client)) {
+  throw new Error('client bundle exposes no apply — cordis loader will reject as invalid plugin')
+}
 rmSync(dir, { recursive: true, force: true })
 console.log('SMOKE_OK segments=' + n.c + ' inject=' + JSON.stringify(m.inject) + ' client-banner=ok')

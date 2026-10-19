@@ -1,7 +1,7 @@
 {
   "id": "dsh-reference-session",
   "name": "dsh-reference-session",
-  "version": "0.1.0-local.2",
+  "version": "0.1.0-local.3",
   "description": {
     "en": "Session reference projector (DRS): read-only scan of ~/.dsh/sessions logs, decoded into a private SQLite (segments/replaces/FTS5) with surface flags, recall-pair accounting and a Chinese-capable search face, served via /api/dsh-reference-session. Never writes session files.",
     "zh": "会话原文投影同步器（DRS）：只读扫描 ~/.dsh/sessions 会话日志，解码后投影进自有 SQLite（segments/replaces/FTS5），经 /api/dsh-reference-session 提供 surface 标记、召回对账与中文可用的内容检索面。绝不写会话文件。"
