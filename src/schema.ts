@@ -1,0 +1,227 @@
+/**
+ * 投影库装配（spec §DDL）：node:sqlite 四表一虚表 + WAL/mmap 缓存层 1 +
+ * sessions 汇总常驻 Map（缓存层 2）。写纪律：每 session 全量重写式替换
+ * （事务内 DELETE+INSERT），幂等。
+ *
+ * 本库只落在 ~/.dsh-reference-session/projection.db ——绝不触碰会话文件。
+ */
+import { DatabaseSync } from 'node:sqlite'
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import type { SessionProjection, SessionSummary } from './projection.ts'
+import { segmentForIndex } from './segment.ts'
+
+/** schema 版本（meta 表；断裂式迁移的比对基线）。 */
+export const PROJECTION_SCHEMA_VERSION = '1'
+
+/** sessions 表原始行（snake_case 与 DDL 一致）。 */
+export interface SessionRow {
+  session_id: string
+  dir_id: string
+  title: string
+  cwd: string
+  event_count: number
+  max_seq: number
+  turn_count: number
+  segment_tokens: number
+  surface_tokens: number
+  gross_saved: number
+  recall_tokens: number
+  compress_pairs: number
+  recall_pairs: number
+  basis: string
+  artifact_bytes: number
+  artifact_mtime_ms: number
+  last_time_ms: number
+  archived: number
+  synced_at: string
+}
+
+/** replaceSession 的产物 watermark 附加项。 */
+export interface ReplaceSessionExtra {
+  /** 归档集标志（sync 侧按 workspace.json 只读跟随）。 */
+  archived?: 0 | 1
+  /** 预置标题（steward 切料同款，缺省用 projection.summary.title）。 */
+  title?: string
+}
+
+/** 投影库句柄。 */
+export interface ProjectionStore {
+  db: DatabaseSync
+  /** 缓存层 2：sessions 全表常驻（~百行级），status/sessions 列表 0 SQL。 */
+  summaries: Map<string, SessionRow>
+  /** 事务式全量重写一个会话；提交后增量更新常驻行。 */
+  replaceSession(projection: SessionProjection, artifactBytes: number, artifactMtimeMs: number, extra?: ReplaceSessionExtra): void
+  /** 翻转归档旗标（不动投影内容）。 */
+  setArchived(sessionId: string, archived: 0 | 1): void
+  close(): void
+}
+
+const DDL = `
+CREATE TABLE IF NOT EXISTS sessions(
+  session_id TEXT PRIMARY KEY, dir_id TEXT NOT NULL, title TEXT DEFAULT '',
+  cwd TEXT DEFAULT '', event_count INTEGER DEFAULT 0, max_seq INTEGER DEFAULT -1,
+  turn_count INTEGER DEFAULT 0, segment_tokens INTEGER DEFAULT 0,
+  surface_tokens INTEGER DEFAULT 0, gross_saved INTEGER DEFAULT 0,
+  recall_tokens INTEGER DEFAULT 0, compress_pairs INTEGER DEFAULT 0,
+  recall_pairs INTEGER DEFAULT 0, basis TEXT DEFAULT 'chars/4',
+  artifact_bytes INTEGER DEFAULT 0, artifact_mtime_ms INTEGER DEFAULT 0,
+  last_time_ms INTEGER DEFAULT 0,
+  archived INTEGER DEFAULT 0,
+  synced_at TEXT DEFAULT (datetime('now')));
+CREATE INDEX IF NOT EXISTS idx_sessions_dir ON sessions(dir_id);
+CREATE TABLE IF NOT EXISTS segments(
+  session_id TEXT NOT NULL, seq INTEGER NOT NULL, turn INTEGER DEFAULT 0,
+  step INTEGER DEFAULT 0, kind TEXT NOT NULL, role TEXT DEFAULT '',
+  time INTEGER DEFAULT 0,
+  text TEXT DEFAULT '', tokens INTEGER DEFAULT 0,
+  search_text TEXT DEFAULT '',
+  on_surface INTEGER DEFAULT 1,
+  compressed INTEGER DEFAULT 0,
+  surface_text TEXT, surface_tokens INTEGER, replaced_by INTEGER,
+  PRIMARY KEY(session_id, seq)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_segments_turn ON segments(session_id, turn, step);
+CREATE TABLE IF NOT EXISTS replaces(
+  session_id TEXT NOT NULL, seq INTEGER NOT NULL, start_seq INTEGER NOT NULL,
+  end_seq INTEGER NOT NULL, a_tokens INTEGER NOT NULL, b_tokens INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('compress','recall')),
+  turn INTEGER DEFAULT 0, step INTEGER DEFAULT 0,
+  PRIMARY KEY(session_id, seq)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_replaces_range ON replaces(session_id, start_seq);
+CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
+  index_text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED,
+  tokenize='unicode61');
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+`
+
+function summaryToRow(s: SessionSummary, artifactBytes: number, artifactMtimeMs: number, extra?: ReplaceSessionExtra): SessionRow {
+  return {
+    session_id: s.sessionId,
+    dir_id: s.dirId,
+    title: extra?.title !== undefined && extra.title !== '' ? extra.title : s.title,
+    cwd: s.cwd,
+    event_count: s.eventCount,
+    max_seq: s.maxSeq,
+    turn_count: s.turnCount,
+    segment_tokens: s.segmentTokens,
+    surface_tokens: s.surfaceTokens,
+    gross_saved: s.grossSaved,
+    recall_tokens: s.recallTokens,
+    compress_pairs: s.compressPairs,
+    recall_pairs: s.recallPairs,
+    basis: s.basis,
+    artifact_bytes: artifactBytes,
+    artifact_mtime_ms: artifactMtimeMs,
+    last_time_ms: s.lastTimeMs,
+    archived: extra?.archived ?? 0,
+    synced_at: new Date().toISOString(),
+  }
+}
+
+/**
+ * 打开（或创建）投影库。
+ * @param dir - 库目录（缺省布局 ~/.dsh-reference-session；env 覆盖在 sync 侧解析）。
+ * @returns {@link ProjectionStore}，已载入 sessions 常驻 Map。
+ */
+export function openProjectionStore(dir: string): ProjectionStore {
+  mkdirSync(dir, { recursive: true })
+  const db = new DatabaseSync(join(dir, 'projection.db'))
+  db.exec(`
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA temp_store=MEMORY;
+PRAGMA cache_size=-32000;
+PRAGMA mmap_size=268435456;
+PRAGMA application_id=0x44525353;
+`)
+  db.exec(DDL)
+  db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .run('schema_version', PROJECTION_SCHEMA_VERSION)
+
+  const summaries = new Map<string, SessionRow>()
+  const loadAll = () => {
+    summaries.clear()
+    const rows = db.prepare('SELECT * FROM sessions').all() as unknown as SessionRow[]
+    for (const row of rows) summaries.set(row.session_id, row)
+  }
+  loadAll()
+
+  const insertSegment = db.prepare(`INSERT INTO segments(
+    session_id, seq, turn, step, kind, role, time, text, tokens, search_text,
+    on_surface, compressed, surface_text, surface_tokens, replaced_by)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  const insertReplace = db.prepare(`INSERT INTO replaces(
+    session_id, seq, start_seq, end_seq, a_tokens, b_tokens, kind, turn, step)
+    VALUES(?,?,?,?,?,?,?,?,?)`)
+  const insertFts = db.prepare(`INSERT INTO segments_fts(index_text, session_id, seq, kind) VALUES(?,?,?,?)`)
+  const upsertSession = db.prepare(`INSERT INTO sessions(
+    session_id, dir_id, title, cwd, event_count, max_seq, turn_count, segment_tokens,
+    surface_tokens, gross_saved, recall_tokens, compress_pairs, recall_pairs, basis,
+    artifact_bytes, artifact_mtime_ms, last_time_ms, archived, synced_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      dir_id=excluded.dir_id, title=excluded.title, cwd=excluded.cwd,
+      event_count=excluded.event_count, max_seq=excluded.max_seq,
+      turn_count=excluded.turn_count, segment_tokens=excluded.segment_tokens,
+      surface_tokens=excluded.surface_tokens, gross_saved=excluded.gross_saved,
+      recall_tokens=excluded.recall_tokens, compress_pairs=excluded.compress_pairs,
+      recall_pairs=excluded.recall_pairs, basis=excluded.basis,
+      artifact_bytes=excluded.artifact_bytes, artifact_mtime_ms=excluded.artifact_mtime_ms,
+      last_time_ms=excluded.last_time_ms, archived=excluded.archived,
+      synced_at=excluded.synced_at`)
+
+  return {
+    db,
+    summaries,
+    replaceSession(projection, artifactBytes, artifactMtimeMs, extra) {
+      const { summary, segments, replaces } = projection
+      const row = summaryToRow(summary, artifactBytes, artifactMtimeMs, extra)
+      db.exec('BEGIN')
+      try {
+        db.prepare('DELETE FROM segments WHERE session_id=?').run(row.session_id)
+        db.prepare('DELETE FROM replaces WHERE session_id=?').run(row.session_id)
+        db.prepare('DELETE FROM segments_fts WHERE session_id=?').run(row.session_id)
+        for (const seg of segments) {
+          insertSegment.run(row.session_id, seg.seq, seg.turn, seg.step, seg.kind, seg.role,
+            seg.time, seg.text, seg.tokens, seg.searchText, seg.onSurface, seg.compressed,
+            seg.surfaceText, seg.surfaceTokens, seg.replacedBy)
+        }
+        for (const rep of replaces) {
+          insertReplace.run(row.session_id, rep.seq, rep.startSeq, rep.endSeq,
+            rep.aTokens, rep.bTokens, rep.kind, rep.turn, rep.step)
+        }
+        for (const seg of segments) {
+          if (seg.searchText === '') continue
+          insertFts.run(segmentForIndex(seg.searchText), row.session_id, seg.seq, seg.kind)
+        }
+        upsertSession.run(
+          row.session_id, row.dir_id, row.title, row.cwd, row.event_count, row.max_seq,
+          row.turn_count, row.segment_tokens, row.surface_tokens, row.gross_saved,
+          row.recall_tokens, row.compress_pairs, row.recall_pairs, row.basis,
+          row.artifact_bytes, row.artifact_mtime_ms, row.last_time_ms, row.archived, row.synced_at)
+        db.exec('COMMIT')
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+      // 缓存层 2：事务提交后增量更新常驻行。
+      summaries.set(row.session_id, row)
+    },
+    setArchived(sessionId, archived) {
+      const current = summaries.get(sessionId)
+      if (current !== undefined && current.archived === archived) return
+      db.prepare('UPDATE sessions SET archived=? WHERE session_id=?').run(archived, sessionId)
+      if (current !== undefined) summaries.set(sessionId, { ...current, archived })
+    },
+    close() {
+      db.close()
+    },
+  }
+}
+
+/** 重新打开时同步常驻 Map（内部工具；openProjectionStore 已在构造时载入）。 */
+export function reloadSummaries(store: ProjectionStore): void {
+  const rows = store.db.prepare('SELECT * FROM sessions').all() as unknown as SessionRow[]
+  store.summaries.clear()
+  for (const row of rows) store.summaries.set(row.session_id, row)
+}
