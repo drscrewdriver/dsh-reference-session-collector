@@ -74,6 +74,12 @@
   DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS,0=关闭),轮=syncAll(stat 命中
   零解码);与启动首轮/syncing 旗标不并发;dispose 清定时器(验证:假 timers
   两轮空转 <50ms 且零解码;checklist 对应项绿)
+- [x] ✅ T3.4 删除剪枝(2026-10-20 用户定标补口):被宿主删会话=磁盘目录
+  消失→每轮 syncAll 尾部对照 listProjectedDirs,对不在发现集的 dirId 走
+  store.deleteSession(WAL 事务级联清 segments/segments_fts/replaces/
+  sessions 四表+常驻 Map,按 uuid);SyncResult.pruned 如实报告;守护:
+  sessions 根缺失或发现截断不动手(宁留陈旧不误删)
+  (验证:sync 3 例+schema 级联 1 例+e2e 真身 1 例,97/97;local.9)
 
 ## Phase 4: 查询面与缓存
 
@@ -128,8 +134,9 @@
   本地 docs/docs_fts 退役;硬依赖不回退(manifest 依赖声明留后续)
   (验证:DRS 89/89、steward 226/226、真机 content-search items=5 全锚定无噪)
 - [ ] T7.2 新鲜度链路验收:interval(T3.3)下新会话≤1 分钟可搜;
-  旧目录退役由 steward 侧开关执行,不在 DRS 里做清理
-  (验证:真机新会话 1 分钟内命中)
+  旧目录退役由 steward 侧开关执行;**投影侧删除跟随已在 DRS 做**
+  (T3.4 剪枝补口推翻本行旧表述「不在 DRS 里做清理」)
+  (验证:真机新会话 1 分钟内命中;删会话后下一轮 pruned 非空且四表零残留)
 
 ## Phase 8: 三期接线 —— memory 历史投影只读(改 dsh-prime-memory)
 

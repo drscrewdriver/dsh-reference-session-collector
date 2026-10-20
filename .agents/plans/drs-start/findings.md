@@ -271,3 +271,22 @@
   面板（遮罩挡滚动效果）。locate.spec 7 例+全量 233/233+client 套全绿。
 - **数据面预检真机 10/10 LOCATABLE**（needle 全部解析成功零跳过）；
   GUI 目验待用户点击（ComputerUse 被浏览器 URL 置信策略挡住）。
+
+## 删除剪枝补口轮（2026-10-20，T3.4，local.9）
+
+- **触发**：桌面版取证发现 35 个会话目录已从磁盘消失但旧投影曾长期驻留
+  （v4 重置只是碰巧清了库——稳态下 syncAll 只增不删，删除是漏项）。
+  用户定标：被 session 删除的会话记录要传导给 DRS，用 WAL+按 uuid 级联
+  清理对应内容的方式处理。
+- **实现**：SyncStorePort 增 listProjectedDirs/deleteSession 两方法（端口
+  扩为五方法）；syncAll 尾部对照发现集剪枝；真身 deleteSession=BEGIN 事务
+  删 segments/segments_fts/replaces/sessions 四表（库本已 journal_mode=WAL）,
+  提交后摘常驻 Map，Map 外幂等 false；SyncResult.pruned 数组如实上报。
+- **守护（防误杀设计）**：sessions 根缺失（挂盘故障/整目录搬走）或发现被
+  limit 截断时整轮不剪枝——陈旧行代价远小于误删全集；软跳会话从未入库，
+  天然不在剪枝面。
+- **验证**：97/97（+5：mock 剪枝/根守护/截断守护、真身四表级联+重开不
+  复活、e2e 端到端删目录→pruned 非空+幸存可检）；门禁链 pnpm check 绿。
+- **装机状态**：local.9 tgz 已出，双 profile 安装待桌面 Electron 关停后执行
+  （desktop profile 修改纪律）；旧陈旧投影无需手工清——装后首轮 interval 自动剪。
+
