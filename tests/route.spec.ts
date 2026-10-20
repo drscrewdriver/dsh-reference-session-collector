@@ -130,6 +130,19 @@ describe('GET op 分发', () => {
     expect(((none.json() as Record<string, unknown>).hits as unknown[]).length).toBe(0)
   })
 
+  it('search group=session&expand=1 命中展开臂 → 200（steward 分开显示开关透传）', async () => {
+    const res = await get('/api/dsh-reference-session-collector?op=search&group=session&q=搜索标记词&archived=all&expand=1')
+    expect(res.statusCode).toBe(200)
+    const hits = (res.json() as { hits: Record<string, unknown>[] }).hits
+    expect(hits.length).toBeGreaterThan(0)
+    // 展开行仍携会话级字段（title/updated_at）+ 命中级 seq——定位臂依赖它
+    expect(hits[0]).toHaveProperty('seq')
+    expect(hits[0]).toHaveProperty('title')
+    // 非法/缺省 expand 不触发展开（与聚合臂同形，旧客户端零感知）
+    const plain = await get('/api/dsh-reference-session-collector?op=search&group=session&q=搜索标记词&archived=all&expand=0')
+    expect(((plain.json() as { hits: unknown[] }).hits.length).valueOf()).toBe(hits.length)
+  })
+
   it('缺 session/q 参数 → 400；未知 op → 400', async () => {
     expect((await get('/api/dsh-reference-session-collector?op=session')).statusCode).toBe(400)
     expect((await get('/api/dsh-reference-session-collector?op=search')).statusCode).toBe(400)

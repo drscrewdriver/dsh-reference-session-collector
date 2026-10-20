@@ -352,6 +352,32 @@ describe('searchGrouped(分组臂：steward 检索语义直译)', () => {
     const open = searchGrouped(ctx, { query: '投影', surfaceOnly: false, kinds: ['user/message', 'assistant/message'] })
     expect(open.hits.length).toBeGreaterThanOrEqual(1)
   })
+
+  it('expand=true 命中展开：同会话多行各自成行（聚合臂超集），会话集不变', () => {
+    const req = { query: '投影', kinds: ['user/message', 'assistant/message', 'tool/result'], surfaceOnly: false } as const
+    const merged = searchGrouped(ctx, req)
+    const expanded = searchGrouped(ctx, { ...req, expand: true })
+    const mKeys = merged.hits.map(h => `${h.session_id}#${h.seq}`)
+    const eKeys = expanded.hits.map(h => `${h.session_id}#${h.seq}`)
+    // s1 的 seq1(user/在面) 与 seq3(assistant/阴影) 都含「投影」：展开臂两行齐现
+    expect(eKeys).toContain('s1#1')
+    expect(eKeys).toContain('s1#3')
+    expect(eKeys.length).toBeGreaterThan(mKeys.length)
+    // 展开只拆行不扩域：会话集与聚合臂一致，每行仍携 title/锚定 snippet
+    expect(new Set(expanded.hits.map(h => h.session_id))).toEqual(new Set(merged.hits.map(h => h.session_id)))
+    expect(expanded.hits.every(h => typeof h.title === 'string' && h.snippet.includes('投影'))).toBe(true)
+  })
+
+  it('expand=true × sortBy=time：同会话多行相邻（updated_at 同键后按分数）', () => {
+    const expanded = searchGrouped(ctx, {
+      query: '投影', kinds: ['user/message', 'assistant/message', 'tool/result'],
+      surfaceOnly: false, expand: true, sortBy: 'time',
+    })
+    const ids = expanded.hits.map(h => h.session_id)
+    // s1(updated_at=1005) 两行连排在前，s2 在后——无交错
+    expect(ids.slice(0, 2)).toEqual(['s1', 's1'])
+    expect(ids[ids.length - 1]).toBe('s2')
+  })
 })
 
 describe('buildSearchSnippet(锚定节选)', () => {

@@ -309,6 +309,7 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
           ...(url.searchParams.get('surface') === '0' ? { surfaceOnly: false } : {}),
           ...(url.searchParams.get('sort') === 'time' ? { sortBy: 'time' as const } : {}),
           ...(limitRaw !== null && Number.isFinite(Number(limitRaw)) ? { limit: Number(limitRaw) } : {}),
+          ...(url.searchParams.get('expand') === '1' ? { expand: true } : {}),
           ...(redact ? { redact: true } : {}),
         })
         writeJson(res, 200, { ok: true, ...grouped })

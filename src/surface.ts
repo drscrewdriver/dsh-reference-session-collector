@@ -379,6 +379,12 @@ export interface GroupedSearchRequest {
   limit?: number
   /** R3：true=snippet 取材切 redacted_search_text（命中/排序不变，fts 仍原文）。 */
   redact?: boolean
+  /**
+   * 命中展开（steward「分开显示」开关，wire `expand=1`）：true=每条候选行
+   * 各自成命中（同会话多行按全局分数序出现）；缺省 false=会话分组各取
+   * 最强命中（既有聚合臂行为零改动，limit 语义随之从会话数变行数）。
+   */
+  expand?: boolean
 }
 
 /** 分组命中（wire 蛇形，会话级最强命中）。 */
@@ -445,14 +451,19 @@ export function searchGrouped(ctx: QueryContext, request: GroupedSearchRequest):
       title: string
       updated_at: number
     }[]
-  const bestBySession = new Map<string, { doc: typeof docs[number]; score: number }>()
-  for (const doc of docs) {
-    const weight = SEARCH_TYPE_WEIGHT[doc.kind] ?? 1
-    const score = -Number(doc.rank) * weight
-    const best = bestBySession.get(doc.session_id)
-    if (best === undefined || score > best.score) bestBySession.set(doc.session_id, { doc, score })
+  const scored = docs.map(doc => ({ doc, score: -Number(doc.rank) * (SEARCH_TYPE_WEIGHT[doc.kind] ?? 1) }))
+  let grouped: typeof scored
+  if (request.expand === true) {
+    // 命中展开：不折叠，每条候选行都是命中（同会话多行各自显示）。
+    grouped = scored
+  } else {
+    const bestBySession = new Map<string, { doc: typeof docs[number]; score: number }>()
+    for (const entry of scored) {
+      const best = bestBySession.get(entry.doc.session_id)
+      if (best === undefined || entry.score > best.score) bestBySession.set(entry.doc.session_id, entry)
+    }
+    grouped = [...bestBySession.values()]
   }
-  const grouped = [...bestBySession.values()]
   if (request.sortBy === 'time') {
     grouped.sort((a, b) => (b.doc.updated_at - a.doc.updated_at) || (b.score - a.score))
   } else {
