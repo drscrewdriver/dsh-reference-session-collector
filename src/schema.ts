@@ -13,10 +13,12 @@ import { segmentForIndex } from './segment.ts'
 
 /** schema 版本（meta 表；断裂式迁移的比对基线）。
  * v2=加 sessions.format_generation；
- * v3=search_text 视界变更（剥离宿主注入样板段，strip-injected horizon v2）——
- * 旧行含污染语料且 artifact 水位未变、增量轮永不重投，故跨 v3 整库清空，
- * 下一轮 syncAll 全量重建（投影可重建，丢行无损）。 */
-export const PROJECTION_SCHEMA_VERSION = '3'
+ * v3=search_text 视界变更（剥离宿主注入样板段，strip-injected horizon v2）；
+ * v4=账目双修（真机取证 2026-10-20）：① text/tokens 视界补 data.content 双臂
+ *   （checkpoint 替身/用户消息旧视界全计 0）；② replaces 加 live 列——替身行
+ *   被后续区间再覆盖时 delta 清除不入 gross（用户定标：checkpoint 只影响其后
+ *   的积分）。旧行两项口径均错，整库清空重建（投影可重建，丢行无损）。 */
+export const PROJECTION_SCHEMA_VERSION = '4'
 
 /** sessions 表原始行（snake_case 与 DDL 一致）。 */
 export interface SessionRow {
@@ -92,6 +94,7 @@ CREATE TABLE IF NOT EXISTS replaces(
   end_seq INTEGER NOT NULL, a_tokens INTEGER NOT NULL, b_tokens INTEGER NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('compress','recall')),
   turn INTEGER DEFAULT 0, step INTEGER DEFAULT 0,
+  live INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY(session_id, seq)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_replaces_range ON replaces(session_id, start_seq);
 CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
@@ -148,6 +151,11 @@ PRAGMA application_id=0x44525353;
   if (!cols.some(c => c.name === 'format_generation')) {
     db.exec('ALTER TABLE sessions ADD COLUMN format_generation INTEGER DEFAULT -1')
   }
+  // v3→v4 旧库补列（列检查幂等安全；行数据随后被版本重置清空）。
+  const repCols = db.prepare('PRAGMA table_info(replaces)').all() as unknown as { name: string }[]
+  if (!repCols.some(c => c.name === 'live')) {
+    db.exec('ALTER TABLE replaces ADD COLUMN live INTEGER NOT NULL DEFAULT 1')
+  }
   const previous = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined
   if (previous !== undefined && previous.value !== PROJECTION_SCHEMA_VERSION) {
     db.exec('BEGIN')
@@ -178,8 +186,8 @@ PRAGMA application_id=0x44525353;
     on_surface, compressed, surface_text, surface_tokens, replaced_by)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
   const insertReplace = db.prepare(`INSERT INTO replaces(
-    session_id, seq, start_seq, end_seq, a_tokens, b_tokens, kind, turn, step)
-    VALUES(?,?,?,?,?,?,?,?,?)`)
+    session_id, seq, start_seq, end_seq, a_tokens, b_tokens, kind, turn, step, live)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`)
   const insertFts = db.prepare(`INSERT INTO segments_fts(index_text, session_id, seq, kind) VALUES(?,?,?,?)`)
   const upsertSession = db.prepare(`INSERT INTO sessions(
     session_id, dir_id, title, cwd, event_count, max_seq, turn_count, segment_tokens,
@@ -216,7 +224,7 @@ PRAGMA application_id=0x44525353;
         }
         for (const rep of replaces) {
           insertReplace.run(row.session_id, rep.seq, rep.startSeq, rep.endSeq,
-            rep.aTokens, rep.bTokens, rep.kind, rep.turn, rep.step)
+            rep.aTokens, rep.bTokens, rep.kind, rep.turn, rep.step, rep.live)
         }
         for (const seg of segments) {
           if (seg.searchText === '') continue

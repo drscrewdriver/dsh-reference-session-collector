@@ -60,6 +60,13 @@ export interface ProjectionReplace {
   kind: 'compress' | 'recall'
   turn: number
   step: number
+  /**
+   * 1=替身行仍在面（delta 生效）；0=替身已被后续 checkpoint/replace 再覆盖，
+   * delta 清除不入 gross（用户定标 2026-10-20：checkpoint 只影响其后的积分，
+   * 被它吸收的先前对不再重复计费——与 CCI projectSavingsCore 「只算仍在
+   * surface 中的替换节点」同语义）。per-pair a/b 保持原始区间事实不回改。
+   */
+  live: 0 | 1
 }
 
 /** sessions 表一行的投影侧字段（watermark/archived 由 sync 侧补写）。 */
@@ -115,18 +122,33 @@ function joinText(parts: readonly (string | undefined)[]): string {
   return parts.map(part => (typeof part === 'string' ? part.trim() : '')).filter(Boolean).join('\n')
 }
 
-/** CCI verify 同视界：data.message.content[] 的 text 块列表（富块忽略）。 */
+/**
+ * 模型可见文本视界：data.message.content[]（assistant/tool 形状）或
+ * data.content[]（user/message 与宿主 checkpoint 替身形状，真机取证
+ * 2026-10-20：compact-checkpoint 摘要挂在 data.content，旧视界全计 0
+ * 致 b 侧漏记、用户消息漏记）——CCI verify eventTextTokens 同款双臂。
+ * 两臂内容重复时只取一臂（checkpoint 行同时携两份同文，双计会虚高 b）。
+ */
 function modelTextBlocks(event: DecodedEvent): string[] {
   const data = isRecord(event.data) ? event.data : undefined
-  const message = data !== undefined && isRecord(data['message']) ? data['message'] : undefined
-  const content = message !== undefined ? message['content'] : undefined
-  if (!Array.isArray(content)) return []
-  const out: string[] = []
-  for (const block of content) {
-    const text = isRecord(block) ? block['text'] : undefined
-    if (typeof text === 'string' && text !== '') out.push(text)
+  if (data === undefined) return []
+  const message = isRecord(data['message']) ? data['message'] : undefined
+  const collect = (blocks: unknown): string[] => {
+    if (!Array.isArray(blocks)) return []
+    const out: string[] = []
+    for (const block of blocks) {
+      const text = isRecord(block) ? block['text'] : undefined
+      if (typeof text === 'string' && text !== '') out.push(text)
+    }
+    return out
   }
-  return out
+  const fromMessage = collect(message?.['content'])
+  const fromData = collect(data['content'])
+  // 两臂都有且内容完全一致 → 取一臂（不双计）；不一致 → 并集（罕见形状，如实取全）。
+  if (fromMessage.length > 0 && fromData.length > 0) {
+    return joinText(fromMessage) === joinText(fromData) ? fromMessage : [...fromMessage, ...fromData]
+  }
+  return fromMessage.length > 0 ? fromMessage : fromData
 }
 
 /** Extracted text of one content block; unknown blocks contribute nothing. */
@@ -321,6 +343,8 @@ export function projectSessionEvents(
       kind: b > a ? 'recall' : 'compress',
       turn: scanTurn,
       step: scanStep,
+      // 暂置 1；第二遍结束后按覆盖集统一重算（live 旗标）。
+      live: 1,
     })
     for (let seq = range.start; seq <= range.end; seq += 1) {
       covered.add(seq)
@@ -375,6 +399,10 @@ export function projectSessionEvents(
     }
   }
 
+  // live 旗标（用户定标 2026-10-20）：替身行已被后续任何区间再覆盖 → delta
+  // 清除，不再入 grossSaved（checkpoint 只影响其后的积分，不重复计先前对）。
+  for (const pair of replaces) pair.live = covered.has(pair.seq) ? 0 : 1
+
   // turn/step 归属：按 step/start 滚动补齐（段行落在哪个 turn/step 区间）。
   let rollTurn = 0
   let rollStep = 0
@@ -420,7 +448,9 @@ export function projectSessionEvents(
       recallTokens += pair.bTokens
       recallPairs += 1
     } else {
-      grossSaved += pair.aTokens - pair.bTokens
+      // 只计仍生效（live=1）的压缩对——被 checkpoint 吸收的先前对 delta 已清除，
+      // 其原文的节省由 checkpoint 自身那对计费，不双计。
+      if (pair.live === 1) grossSaved += pair.aTokens - pair.bTokens
       compressPairs += 1
     }
   }

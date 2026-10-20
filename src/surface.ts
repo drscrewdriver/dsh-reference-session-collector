@@ -181,7 +181,10 @@ export function surfaceLedger(ctx: QueryContext, sessionId: string): Record<stri
   return value
 }
 
-/** 召回对账（R4）：替换对分类 + Σb（回吐）+ Σ(a−b)（毛节省）（LRU）。 */
+/**
+ * 召回对账（R4）：替换对分类 + Σb（回吐）+ Σ(a−b)（毛节省）（LRU）。
+ * 毛节省只计 live=1 的对——替身被后续 checkpoint 再覆盖时 delta 清除（用户定标）。
+ */
 export function recallReport(ctx: QueryContext, sessionId: string): Record<string, unknown> {
   const store = ctx.store
   const synced = store.summaries.get(sessionId)?.synced_at ?? '?'
@@ -189,18 +192,22 @@ export function recallReport(ctx: QueryContext, sessionId: string): Record<strin
   const cached = ctx.recallLru.get(key)
   if (cached !== undefined) return cached as Record<string, unknown>
   const pairs = store.db.prepare(
-    'SELECT seq, start_seq, end_seq, a_tokens, b_tokens, kind, turn, step FROM replaces WHERE session_id=? ORDER BY seq',
-  ).all(sessionId) as unknown as { kind: string; a_tokens: number; b_tokens: number }[]
+    'SELECT seq, start_seq, end_seq, a_tokens, b_tokens, kind, turn, step, live FROM replaces WHERE session_id=? ORDER BY seq',
+  ).all(sessionId) as unknown as { kind: string; a_tokens: number; b_tokens: number; live: number }[]
   let gross = 0
   let recall = 0
   let compressPairs = 0
   let recallPairs = 0
+  let livePairs = 0
   for (const p of pairs) {
     if (p.kind === 'recall') {
       recall += p.b_tokens
       recallPairs += 1
     } else {
-      gross += p.a_tokens - p.b_tokens
+      if (p.live === 1) {
+        gross += p.a_tokens - p.b_tokens
+        livePairs += 1
+      }
       compressPairs += 1
     }
   }
@@ -211,6 +218,8 @@ export function recallReport(ctx: QueryContext, sessionId: string): Record<strin
     recall_tokens: recall,
     compress_pairs: compressPairs,
     recall_pairs: recallPairs,
+    /** 仍生效的压缩对数（其余已被 checkpoint 吸收，delta 已清除）。 */
+    live_pairs: livePairs,
     basis: store.summaries.get(sessionId)?.basis ?? 'chars/4',
   }
   ctx.recallLru.set(key, value)

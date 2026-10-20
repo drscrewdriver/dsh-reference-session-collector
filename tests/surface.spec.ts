@@ -45,7 +45,7 @@ function segment(over: Partial<ProjectionSegment> & Pick<ProjectionSegment, 'seq
 }
 
 function replace(over: Partial<ProjectionReplace> & Pick<ProjectionReplace, 'seq' | 'kind'>): ProjectionReplace {
-  return { startSeq: over.seq ?? 0, endSeq: over.seq ?? 0, aTokens: 0, bTokens: 0, turn: 1, step: 1, ...over }
+  return { startSeq: over.seq ?? 0, endSeq: over.seq ?? 0, aTokens: 0, bTokens: 0, turn: 1, step: 1, live: 1, ...over }
 }
 
 function summary(over: Partial<SessionSummary> & Pick<SessionSummary, 'sessionId' | 'dirId'>): SessionSummary {
@@ -142,7 +142,7 @@ describe('status / listSessions(缓存层 2)', () => {
     expect(report['sessions']).toBe(2)
     expect(report['segments']).toBe(6)
     expect(report['replaces']).toBe(2)
-    expect(report['schema_version']).toBe('3')
+    expect(report['schema_version']).toBe('4')
     const cache = report['cache'] as Record<string, unknown>
     expect(cache['summaries']).toBe(2)
     expect(cache['surface_ledger']).toHaveProperty('hits')

@@ -56,7 +56,11 @@ describe('projectSessionEvents', () => {
     expect(recall?.startSeq).toBe(4)
     expect(recall?.endSeq).toBe(4)
     expect(recall?.bTokens).toBe(LONG_TOKENS)
-    expect(summary.grossSaved).toBe(LONG_TOKENS - 1)
+    // live 清除（用户定标 2026-10-20）：压缩对的替身 seq4 又被召回对 [4..4] 覆盖
+    // → delta 清除不入 gross（真实节省归零：全文已回到面上），不双计。
+    expect(compress?.live).toBe(0)
+    expect(recall?.live).toBe(1)
+    expect(summary.grossSaved).toBe(0)
     expect(summary.recallTokens).toBe(LONG_TOKENS)
     expect(summary.compressPairs).toBe(1)
     expect(summary.recallPairs).toBe(1)
@@ -97,8 +101,9 @@ describe('projectSessionEvents', () => {
     expect(bySeq.get(7)?.searchText).toBe('pending\n写报告')
     expect(bySeq.get(8)?.searchText).toBe('error\n超时')
     expect(bySeq.get(1)?.searchText).toBe('原始问题')
-    // user/message 无 data.message → CCI 视界 text 为空但检索面收录
-    expect(bySeq.get(1)?.text).toBe('')
+    // 双臂视界（horizon v4）：user/message 的 data.content 也入 text/tokens（旧单臂全空已修）
+    expect(bySeq.get(1)?.text).toBe('原始问题')
+    expect(bySeq.get(1)?.tokens).toBe(1)
   })
 
   it('time 落事件 epoch ms；last_time_ms=事件最大 time', () => {
@@ -169,5 +174,53 @@ describe('projectSessionEvents × 注入剥离（horizon v2）', () => {
     const row = pure.segments.find(s => s.seq === 7)
     expect(row?.searchText).toBe('')
     expect(row?.text).toBe('<scene-navigation>导航样板</scene-navigation>')
+  })
+  describe('live 清除与 data.content 视界（horizon v4 / 用户定标 2026-10-20）', () => {
+    it('替身行被后续区间再覆盖 → live=0，其 delta 不入 grossSaved（checkpoint 只影响其后积分）', () => {
+      // 链：orig(seq2, 40tok) → stub(seq5, 10tok) → checkpoint(seq9) 覆盖 [1..6] 含 stub。
+      const long = 'x'.repeat(160) // chars/4 = 40
+      const stub = 's'.repeat(40)  // chars/4 = 10
+      const ck = 'c'.repeat(80)   // chars/4 = 20
+      const evs = [
+        { type: 'user/message', seq: 2, time: 1, data: { content: [{ type: 'text', text: long }] } },
+        { type: 'user/message', seq: 5, time: 2, data: { content: [{ type: 'text', text: stub }] }, surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 } },
+        { type: 'user/message', seq: 9, time: 3, data: { content: [{ type: 'text', text: ck }] }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 6 } },
+      ]
+      const p = projectSessionEvents(evs as unknown as DecodedEvent[], { dirId: 'd' })
+      const pair1 = p.replaces.find(r => r.seq === 5)
+      const pair2 = p.replaces.find(r => r.seq === 9)
+      expect(pair1?.live).toBe(0) // stub 被 checkpoint 吸收，先前 delta 清除
+      expect(pair2?.live).toBe(1)
+      // per-pair a/b 保持区间事实不回改：pair1 a=40 b=10；pair2 a=50(40+10) b=20。
+      expect(pair1?.aTokens).toBe(40); expect(pair1?.bTokens).toBe(10)
+      expect(pair2?.aTokens).toBe(50); expect(pair2?.bTokens).toBe(20)
+      // gross 只计 live 对：50−20=30（40−10 那对已清除，不双计）。
+      expect(p.summary.grossSaved).toBe(30)
+      expect(p.summary.compressPairs).toBe(2)
+    })
+    it('替身仍在面的对正常入 gross；checkpoint 摘要挂 data.content 也被计（双臂视界）', () => {
+      const long = 'y'.repeat(200) // 50 tok
+      const ck = 'z'.repeat(40)   // 10 tok（旧视界下挂 data.content 会全计 0）
+      const evs = [
+        { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: long }] } },
+        { type: 'user/message', seq: 4, time: 2, data: { content: [{ type: 'text', text: ck }], source: { kind: 'compact-checkpoint' } }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } },
+      ]
+      const p = projectSessionEvents(evs as unknown as DecodedEvent[], { dirId: 'd' })
+      const pair = p.replaces.find(r => r.seq === 4)
+      expect(pair?.live).toBe(1)
+      expect(pair?.aTokens).toBe(50); expect(pair?.bTokens).toBe(10)
+      expect(p.summary.grossSaved).toBe(40)
+      // 替身行自身文本/ token 也落了段行（旧视界下 text='' tokens=0）
+      const row = p.segments.find(s => s.seq === 4)
+      expect(row?.text).toBe(ck); expect(row?.tokens).toBe(10)
+    })
+    it('双臂同文不双计（data.content 与 data.message.content 同内容 → 取一臂）', () => {
+      const body = 'w'.repeat(120) // 30 tok；双臂并集会得 60
+      const p = projectSessionEvents([
+        { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: body }], message: { content: [{ type: 'text', text: body }] } } },
+      ], { dirId: 'd' })
+      const row = p.segments.find(s => s.seq === 1)
+      expect(row?.tokens).toBe(30)
+    })
   })
 })
