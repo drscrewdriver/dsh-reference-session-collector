@@ -1,9 +1,9 @@
-# dsh-reference-session (DRS) — синхронизатор проекции сессий
+# dsh-reference-session-collector (DRS) — синхронизатор проекции сессий
 
 **Плагин DeepSeek Harness (DSH)**: сканирует **только на чтение** журналы
 сессий в `~/.dsh/sessions/**`, декодирует их и проецирует в собственную
 SQLite-проекцию (segments / replaces / FTS5). Одна защищённая HTTP-маршрут
-`GET/POST /api/dsh-reference-session` предоставляет пометки поверхности,
+`GET/POST /api/dsh-reference-session-collector` предоставляет пометки поверхности,
 сверку вызовов (recall) и полнотекстовый поиск с поддержкой китайского.
 **Никогда не записывает в файлы сессий.**
 
@@ -24,10 +24,10 @@ SQLite-проекцию (segments / replaces / FTS5). Одна защищённ�
 ~/.dsh/sessions/** (только чтение) ──→ ProjectionSync (инкрементально, watermark=bytes+mtime)
                                    │ projectSessionEvents (чистое ядро)
                                    ▼
-        ~/.dsh-reference-session/projection.db (4 таблицы + fts5 + 3 уровня кэша)
+        ~/.dsh-reference-session-collector/projection.db (4 таблицы + fts5 + 3 уровня кэша)
                                    │
               ┌────────────────────┼───────────────────┐
-   /api/dsh-reference-session     CCI (фаза 1)   steward (2) / memory (3)
+   /api/dsh-reference-session-collector     CCI (фаза 1)   steward (2) / memory (3)
 ```
 
 ## Таблица HTTP-маршрутов
@@ -46,7 +46,7 @@ SQLite-проекцию (segments / replaces / FTS5). Одна защищённ�
 
 - файлы сессий и `workspace.json` — всегда только чтение;
 - все записи плагина идут исключительно в
-  `~/.dsh-reference-session/projection.db`;
+  `~/.dsh-reference-session-collector/projection.db`;
 - полная перезапись-замена на сессию (DELETE+INSERT в транзакции), идемпотентно;
 - **ответственность за обезличивание не на DRS**: хранится исходный текст,
   площадь утечки = сами файлы сессий.
@@ -56,13 +56,13 @@ SQLite-проекцию (segments / replaces / FTS5). Одна защищённ�
 | переменная | по умолчанию | значение |
 |---|---|---|
 | `DSH_HOME` | `~/.dsh` | корень журналов сессий |
-| `DSH_REFERENCE_SESSION_DIR` | `~/.dsh-reference-session` | каталог БД проекции |
-| `DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS` | `30000` | интервал sync; `0` = только вручную |
+| `DSH_REFERENCE_SESSION_COLLECTOR_DIR` | `~/.dsh-reference-session-collector` | каталог БД проекции |
+| `DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` | `30000` | интервал sync; `0` = только вручную |
 
 ## Установка / разработка
 
 ```
-dsh plugin --profile web add dsh-reference-session
+dsh plugin --profile web add dsh-reference-session-collector
 pnpm install && pnpm check   # typecheck→lint→test→build→smoke
 ```
 

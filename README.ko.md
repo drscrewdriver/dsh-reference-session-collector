@@ -1,9 +1,9 @@
-# dsh-reference-session (DRS) — 세션 원문 투영 동기화기
+# dsh-reference-session-collector (DRS) — 세션 원문 투영 동기화기
 
 **DeepSeek Harness(DSH) 플러그인**: `~/.dsh/sessions/**` 세션 로그를
 **읽기 전용**으로 스캔하여 디코딩 후 자체 SQLite 투영
 (segments / replaces / FTS5)에 적재. 단일 fenced HTTP 라우트
-`GET/POST /api/dsh-reference-session`로 surface 마크, 리콜 대사(對社),
+`GET/POST /api/dsh-reference-session-collector`로 surface 마크, 리콜 대사(對社),
 중국어 전문 검색면을 제공합니다. **세션 파일에는 절대 기록하지 않습니다.**
 
 ## 상태
@@ -21,10 +21,10 @@
 ~/.dsh/sessions/**(읽기 전용) ──→ ProjectionSync(증분, watermark=bytes+mtime)
                                    │ projectSessionEvents(순수 코어)
                                    ▼
-        ~/.dsh-reference-session/projection.db(4개 테이블 + fts5 + 3계층 캐시)
+        ~/.dsh-reference-session-collector/projection.db(4개 테이블 + fts5 + 3계층 캐시)
                                    │
               ┌────────────────────┼───────────────────┐
-   /api/dsh-reference-session     CCI(1단계)   steward(2단계)/memory(3단계)
+   /api/dsh-reference-session-collector     CCI(1단계)   steward(2단계)/memory(3단계)
 ```
 
 ## HTTP 라우트 표
@@ -42,7 +42,7 @@
 ## 읽기 전용 규율
 
 - 세션 파일과 `workspace.json`은 상시 읽기 전용;
-- 모든 기록은 `~/.dsh-reference-session/projection.db`에만;
+- 모든 기록은 `~/.dsh-reference-session-collector/projection.db`에만;
 - 세션 단위 전체 재작성 치환(트랜잭션 내 DELETE+INSERT), 멱등;
 - **마스킹 책임은 DRS에 없음**: 원문 저장, 노출면=세션 파일 자체.
 
@@ -51,13 +51,13 @@
 | 변수 | 기본값 | 의미 |
 |---|---|---|
 | `DSH_HOME` | `~/.dsh` | 세션 로그 루트 |
-| `DSH_REFERENCE_SESSION_DIR` | `~/.dsh-reference-session` | 투영 DB 디렉터리 |
-| `DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS` | `30000` | 동기화 주기; `0`=수동 전용 |
+| `DSH_REFERENCE_SESSION_COLLECTOR_DIR` | `~/.dsh-reference-session-collector` | 투영 DB 디렉터리 |
+| `DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` | `30000` | 동기화 주기; `0`=수동 전용 |
 
 ## 설치 / 개발
 
 ```
-dsh plugin --profile web add dsh-reference-session
+dsh plugin --profile web add dsh-reference-session-collector
 pnpm install && pnpm check   # typecheck→lint→test→build→smoke
 ```
 

@@ -12,7 +12,7 @@
  * 语义,T7.0 对照表复核)。每会话处理后 setImmediate 让路(CCI 回填同款);
  * syncing 旗标防重入;interval 轮 stat 全命中即零解码零重写。
  *
- * @module dsh-reference-session/sync
+ * @module dsh-reference-session-collector/sync
  */
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs'
 import { homedir } from 'node:os'
@@ -94,12 +94,12 @@ export function resolveDshHome(explicit?: string, env: NodeJS.ProcessEnv = proce
   return join(homedir(), '.dsh')
 }
 
-/** 投影库目录解析:显式入参 > DSH_REFERENCE_SESSION_DIR > ~/.dsh-reference-session。 */
+/** 投影库目录解析:显式入参 > DSH_REFERENCE_SESSION_COLLECTOR_DIR > ~/.dsh-reference-session-collector。 */
 export function resolveIndexDir(explicit?: string, env: NodeJS.ProcessEnv = process.env): string {
   if (explicit !== undefined && explicit !== '') return explicit
-  const fromEnv = env['DSH_REFERENCE_SESSION_DIR']
+  const fromEnv = env['DSH_REFERENCE_SESSION_COLLECTOR_DIR']
   if (fromEnv !== undefined && fromEnv !== '') return fromEnv
-  return join(homedir(), '.dsh-reference-session')
+  return join(homedir(), '.dsh-reference-session-collector')
 }
 
 // ─────────────────────────── 归档集(只读跟随) ───────────────────────────
@@ -394,7 +394,7 @@ export class ProjectionSync {
 /** interval 轮缺省周期:steward 二期新鲜度(≤1 分钟)靠它,不靠手动 POST。 */
 export const DEFAULT_SYNC_INTERVAL_MS = 30_000
 
-export const SYNC_INTERVAL_ENV = 'DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS'
+export const SYNC_INTERVAL_ENV = 'DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS'
 
 /** 解析轮询周期:env 缺省 30s;0=关闭(纯手动);非法值回落缺省。 */
 export function resolveSyncIntervalMs(env: NodeJS.ProcessEnv = process.env): number {

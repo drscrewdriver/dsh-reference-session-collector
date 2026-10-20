@@ -1,9 +1,9 @@
-# dsh-reference-session (DRS) — sincronizador de proyección de sesiones
+# dsh-reference-session-collector (DRS) — sincronizador de proyección de sesiones
 
 **Complemento de DeepSeek Harness (DSH)**: escanea **solo en lectura** los
 registros de sesión en `~/.dsh/sessions/**`, los decodifica y los proyecta
 en una proyección SQLite propia (segments / replaces / FTS5). Una única
-ruta HTTP acotada `GET/POST /api/dsh-reference-session` expone marcas de
+ruta HTTP acotada `GET/POST /api/dsh-reference-session-collector` expone marcas de
 superficie, conciliación de recuperaciones (recall) y búsqueda de texto
 completo con soporte de chino. **Nunca escribe en los archivos de sesión.**
 
@@ -24,10 +24,10 @@ fase 3 relleno de anclas de memory) y banco de pruebas de eficiencia T9.1.
 ~/.dsh/sessions/** (solo lectura) ──→ ProjectionSync (incremental, watermark=bytes+mtime)
                                    │ projectSessionEvents (núcleo puro)
                                    ▼
-        ~/.dsh-reference-session/projection.db (4 tablas + fts5 + caché de 3 niveles)
+        ~/.dsh-reference-session-collector/projection.db (4 tablas + fts5 + caché de 3 niveles)
                                    │
               ┌────────────────────┼───────────────────┐
-   /api/dsh-reference-session     CCI (fase 1)   steward (2) / memory (3)
+   /api/dsh-reference-session-collector     CCI (fase 1)   steward (2) / memory (3)
 ```
 
 ## Tabla de rutas HTTP
@@ -46,7 +46,7 @@ fase 3 relleno de anclas de memory) y banco de pruebas de eficiencia T9.1.
 
 - los archivos de sesión y `workspace.json` son siempre de solo lectura;
 - toda escritura del complemento va únicamente a
-  `~/.dsh-reference-session/projection.db`;
+  `~/.dsh-reference-session-collector/projection.db`;
 - reemplazo de reescritura completa por sesión (DELETE+INSERT en una
   transacción), idempotente;
 - **la desensibilización no es responsabilidad de DRS**: almacena texto
@@ -57,13 +57,13 @@ fase 3 relleno de anclas de memory) y banco de pruebas de eficiencia T9.1.
 | variable | valor por defecto | significado |
 |---|---|---|
 | `DSH_HOME` | `~/.dsh` | raíz de registros de sesión |
-| `DSH_REFERENCE_SESSION_DIR` | `~/.dsh-reference-session` | directorio de la BD de proyección |
-| `DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS` | `30000` | intervalo de sincronización; `0` = solo manual |
+| `DSH_REFERENCE_SESSION_COLLECTOR_DIR` | `~/.dsh-reference-session-collector` | directorio de la BD de proyección |
+| `DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` | `30000` | intervalo de sincronización; `0` = solo manual |
 
 ## Instalación / desarrollo
 
 ```
-dsh plugin --profile web add dsh-reference-session
+dsh plugin --profile web add dsh-reference-session-collector
 pnpm install && pnpm check   # typecheck→lint→test→build→smoke
 ```
 

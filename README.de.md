@@ -1,9 +1,9 @@
-# dsh-reference-session (DRS) — Sitzungs-Projektionssynchronisierer
+# dsh-reference-session-collector (DRS) — Sitzungs-Projektionssynchronisierer
 
 **DeepSeek-Harness(DSH)-Plugin**: Liest die Sitzungsprotokolle unter
 `~/.dsh/sessions/**` **nur lesend**, dekodiert sie und projiziert sie in eine
 eigene SQLite-Projektion (segments / replaces / FTS5). Über eine einzelne
-fenced HTTP-Route `GET/POST /api/dsh-reference-session` werden
+fenced HTTP-Route `GET/POST /api/dsh-reference-session-collector` werden
 Surface-Markierungen, Recall-Abgleich und chinesisch-taugliche
 Volltextsuche bereitgestellt. **Es wird niemals in Sitzungsdateien
 geschrieben.**
@@ -25,10 +25,10 @@ Memory-Anker-Rückfüllung) und Effizienz-Benchmark T9.1.
 ~/.dsh/sessions/** (nur lesend) ──→ ProjectionSync (inkrementell, watermark=bytes+mtime)
                                    │ projectSessionEvents (reiner Kern)
                                    ▼
-        ~/.dsh-reference-session/projection.db (4 Tabellen + fts5 + 3-Schicht-Cache)
+        ~/.dsh-reference-session-collector/projection.db (4 Tabellen + fts5 + 3-Schicht-Cache)
                                    │
               ┌────────────────────┼───────────────────┐
-   /api/dsh-reference-session     CCI (Phase 1)   Steward (2) / Memory (3)
+   /api/dsh-reference-session-collector     CCI (Phase 1)   Steward (2) / Memory (3)
 ```
 
 ## HTTP-Routentabelle
@@ -47,7 +47,7 @@ Memory-Anker-Rückfüllung) und Effizienz-Benchmark T9.1.
 
 - Sitzungsdateien und `workspace.json` sind stets nur lesend;
 - sämtliche Schreibvorgänge gehen ausschließlich nach
-  `~/.dsh-reference-session/projection.db`;
+  `~/.dsh-reference-session-collector/projection.db`;
 - pro Sitzung vollständiger Neu-Schreib-Ersatz (DELETE+INSERT in einer
   Transaktion), idempotent;
 - **Maskierung liegt nicht bei DRS**: Rohtext-Speicherung,
@@ -58,13 +58,13 @@ Memory-Anker-Rückfüllung) und Effizienz-Benchmark T9.1.
 | Variable | Standard | Bedeutung |
 |---|---|---|
 | `DSH_HOME` | `~/.dsh` | Sitzungsprotokoll-Wurzel |
-| `DSH_REFERENCE_SESSION_DIR` | `~/.dsh-reference-session` | Projektion-DB-Verzeichnis |
-| `DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS` | `30000` | Sync-Intervall; `0` = nur manuell |
+| `DSH_REFERENCE_SESSION_COLLECTOR_DIR` | `~/.dsh-reference-session-collector` | Projektion-DB-Verzeichnis |
+| `DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` | `30000` | Sync-Intervall; `0` = nur manuell |
 
 ## Installation / Entwicklung
 
 ```
-dsh plugin --profile web add dsh-reference-session
+dsh plugin --profile web add dsh-reference-session-collector
 pnpm install && pnpm check   # typecheck→lint→test→build→smoke
 ```
 

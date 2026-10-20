@@ -3,7 +3,7 @@
  * sessions 汇总常驻 Map（缓存层 2）。写纪律：每 session 全量重写式替换
  * （事务内 DELETE+INSERT），幂等。
  *
- * 本库只落在 ~/.dsh-reference-session/projection.db ——绝不触碰会话文件。
+ * 本库只落在 ~/.dsh-reference-session-collector/projection.db ——绝不触碰会话文件。
  */
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
@@ -136,7 +136,7 @@ function summaryToRow(s: SessionSummary, artifactBytes: number, artifactMtimeMs:
 
 /**
  * 打开（或创建）投影库。
- * @param dir - 库目录（缺省布局 ~/.dsh-reference-session；env 覆盖在 sync 侧解析）。
+ * @param dir - 库目录（缺省布局 ~/.dsh-reference-session-collector；env 覆盖在 sync 侧解析）。
  * @returns {@link ProjectionStore}，已载入 sessions 常驻 Map。
  */
 export function openProjectionStore(dir: string): ProjectionStore {
@@ -148,7 +148,7 @@ PRAGMA synchronous=NORMAL;
 PRAGMA temp_store=MEMORY;
 PRAGMA cache_size=-32000;
 PRAGMA mmap_size=268435456;
-PRAGMA application_id=0x44525353;
+PRAGMA application_id=0x44525343;
 `)
   db.exec(DDL)
   // 断裂式迁移：旧库 schema_version 存在且与新串不同 → 整库清空（投影可重建）。

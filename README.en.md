@@ -1,4 +1,4 @@
-# dsh-reference-session (DRS)
+# dsh-reference-session-collector (DRS)
 
 **Session reference projection synchronizer** — a DeepSeek Harness (DSH) plugin.
 
@@ -9,7 +9,7 @@ replacement markers, recall pointers, and an FTS5 full-text index — so context
 compression (cci), the session steward, and prime-memory all read the same
 projection instead of each decoding logs on their own.
 
-> Naming: `dsh-reference-session` abbreviates to **DRS**, which is also the
+> Naming: `dsh-reference-session-collector` abbreviates to **DRS**, which is also the
 > first three letters of drscrewdriver.
 
 ## Status
@@ -29,10 +29,10 @@ and store schema below are finalized.
 ~/.dsh/sessions/** (read-only) ──→ ProjectionSync (incremental, watermark)
                                    │ projectSessionEvents (pure core)
                                    ▼
-       projection.db (~/.dsh-reference-session/, 4 tables + fts5, 3-layer cache)
+       projection.db (~/.dsh-reference-session-collector/, 4 tables + fts5, 3-layer cache)
                                    │
            ┌───────────────────────┼────────────────────┐
- /api/dsh-reference-session     cci (phase 1)     steward (2) / memory (3)
+ /api/dsh-reference-session-collector     cci (phase 1)     steward (2) / memory (3)
  (status/surface/recall/…)      savings/recheck   corpus / history backfill
 ```
 
@@ -67,7 +67,7 @@ missing (fail-soft).
 
 `readFileSync` is the **only** call this plugin makes against session files,
 and it has no write counterpart — ever. The plugin writes only to
-`~/.dsh-reference-session/projection.db`. That database holds **unsanitized
+`~/.dsh-reference-session-collector/projection.db`. That database holds **unsanitized
 original text**; its exposure equals the session files themselves. Any
 "sanitized corpus" requirement belongs to consumers, not DRS.
 
@@ -78,8 +78,8 @@ No settings face yet (lands with phase-2 wiring). Environment variables:
 | variable | default | meaning |
 |---|---|---|
 | `DSH_HOME` | `~/.dsh` | session log root |
-| `DSH_REFERENCE_SESSION_DIR` | `~/.dsh-reference-session` | projection db dir |
-| `DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS` | `30000` | sync interval; `0` = manual only |
+| `DSH_REFERENCE_SESSION_COLLECTOR_DIR` | `~/.dsh-reference-session-collector` | projection db dir |
+| `DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` | `30000` | sync interval; `0` = manual only |
 
 ## Roadmap
 

@@ -17,8 +17,8 @@ interface RegisteredRoute { kind: string; path: string; handler?: (req: unknown,
 function freshCtx(webServer?: unknown) {
   const dir = mkdtempSync(join(tmpdir(), 'drs-reg-'))
   dirs.push(dir)
-  const previous = process.env['DSH_REFERENCE_SESSION_DIR']
-  process.env['DSH_REFERENCE_SESSION_DIR'] = dir
+  const previous = process.env['DSH_REFERENCE_SESSION_COLLECTOR_DIR']
+  process.env['DSH_REFERENCE_SESSION_COLLECTOR_DIR'] = dir
   const injectArms: Array<(injected: unknown) => void> = []
   const ctx = {
     get: (name: string) => (name === 'webServer' ? webServer : undefined),
@@ -35,14 +35,14 @@ function freshCtx(webServer?: unknown) {
 }
 
 beforeAll(() => {
-  process.env['DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS'] = '0'
+  process.env['DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS'] = '0'
 })
 afterEach(() => {
   while (disposers.length > 0) disposers.pop()?.()
 })
 afterAll(() => {
-  delete process.env['DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS']
-  delete process.env['DSH_REFERENCE_SESSION_DIR']
+  delete process.env['DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS']
+  delete process.env['DSH_REFERENCE_SESSION_COLLECTOR_DIR']
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -67,7 +67,7 @@ describe('双通道路由注册', () => {
   })
 
   it('duplicate exact route 容错=成功，且不再挂 inject 臂（对侧已拥有路径）', () => {
-    const register = vi.fn((_route: RegisteredRoute): never => { throw new Error('duplicate exact route /api/dsh-reference-session') })
+    const register = vi.fn((_route: RegisteredRoute): never => { throw new Error('duplicate exact route /api/dsh-reference-session-collector') })
     const { ctx, injectArms } = freshCtx({ register })
     expect(() => apply(ctx)).not.toThrow()
     expect(register).toHaveBeenCalledTimes(1)
@@ -99,7 +99,7 @@ describe('双通道路由注册', () => {
     })
     const dir = mkdtempSync(join(tmpdir(), 'drs-hostile-'))
     dirs.push(dir)
-    process.env['DSH_REFERENCE_SESSION_DIR'] = dir
+    process.env['DSH_REFERENCE_SESSION_COLLECTOR_DIR'] = dir
     const offs: Array<() => void> = []
     const base = {
       get: (name: string) => {
@@ -126,7 +126,7 @@ describe('双通道路由注册', () => {
     expect(register).toHaveBeenCalledTimes(1)
     expect(handler).toBeDefined()
     const res = { statusCode: 0, body: '', writeHead(code: number) { res.statusCode = code }, end(data: string) { res.body = data } }
-    const req = { method: 'GET', url: '/api/dsh-reference-session?op=status', headers: { host: '127.0.0.1:3080' } }
+    const req = { method: 'GET', url: '/api/dsh-reference-session-collector?op=status', headers: { host: '127.0.0.1:3080' } }
     await handler?.(req, res)
     expect(res.statusCode).toBe(200)
     while (offs.length > 0) offs.pop()?.()

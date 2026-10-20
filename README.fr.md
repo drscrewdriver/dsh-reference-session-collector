@@ -1,9 +1,9 @@
-# dsh-reference-session (DRS) — Synchroniseur de projection de sessions
+# dsh-reference-session-collector (DRS) — Synchroniseur de projection de sessions
 
 **Plugin DeepSeek Harness (DSH)** : balaie les journaux de session sous
 `~/.dsh/sessions/**` en **lecture seule**, les décode et les projette dans
 une projection SQLite propriétaire (segments / replaces / FTS5). Une unique
-route HTTP cloisonnée `GET/POST /api/dsh-reference-session` expose le marquage de
+route HTTP cloisonnée `GET/POST /api/dsh-reference-session-collector` expose le marquage de
 surface, le rapprochement des rappels et une recherche en texte intégral
 compatible chinois. **N'écrit jamais dans les fichiers de session.**
 
@@ -24,10 +24,10 @@ d'efficacité T9.1.
 ~/.dsh/sessions/** (lecture seule) ──→ ProjectionSync (incrémental, watermark=bytes+mtime)
                                    │ projectSessionEvents (noyau pur)
                                    ▼
-        ~/.dsh-reference-session/projection.db (4 tables + fts5 + cache 3 couches)
+        ~/.dsh-reference-session-collector/projection.db (4 tables + fts5 + cache 3 couches)
                                    │
               ┌────────────────────┼───────────────────┐
-   /api/dsh-reference-session     CCI (phase 1)   steward (2) / memory (3)
+   /api/dsh-reference-session-collector     CCI (phase 1)   steward (2) / memory (3)
 ```
 
 ## Table des routes HTTP
@@ -46,7 +46,7 @@ d'efficacité T9.1.
 
 - fichiers de session et `workspace.json` toujours en lecture seule ;
 - toutes les écritures vont uniquement dans
-  `~/.dsh-reference-session/projection.db` ;
+  `~/.dsh-reference-session-collector/projection.db` ;
 - remplacement réécriture-complète par session (DELETE+INSERT dans une
   transaction), idempotent ;
 - **l'anonymisation n'est pas la responsabilité de DRS** : texte brut
@@ -57,13 +57,13 @@ d'efficacité T9.1.
 | variable | défaut | signification |
 |---|---|---|
 | `DSH_HOME` | `~/.dsh` | racine des journaux de session |
-| `DSH_REFERENCE_SESSION_DIR` | `~/.dsh-reference-session` | répertoire de la BD de projection |
-| `DSH_REFERENCE_SESSION_SYNC_INTERVAL_MS` | `30000` | intervalle de sync ; `0` = manuel uniquement |
+| `DSH_REFERENCE_SESSION_COLLECTOR_DIR` | `~/.dsh-reference-session-collector` | répertoire de la BD de projection |
+| `DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` | `30000` | intervalle de sync ; `0` = manuel uniquement |
 
 ## Installation / Développement
 
 ```
-dsh plugin --profile web add dsh-reference-session
+dsh plugin --profile web add dsh-reference-session-collector
 pnpm install && pnpm check   # typecheck→lint→test→build→smoke
 ```
 

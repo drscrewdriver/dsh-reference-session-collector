@@ -162,7 +162,7 @@ describe('path/env resolution', () => {
 
   it('resolves index dir: explicit > env > default', () => {
     expect(resolveIndexDir('/idx', {})).toBe('/idx')
-    expect(resolveIndexDir(undefined, { DSH_REFERENCE_SESSION_DIR: '/from-env' })).toBe('/from-env')
+    expect(resolveIndexDir(undefined, { DSH_REFERENCE_SESSION_COLLECTOR_DIR: '/from-env' })).toBe('/from-env')
     expect(resolveIndexDir(undefined, {})).not.toBe('')
   })
 })

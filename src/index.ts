@@ -1,9 +1,9 @@
 /**
- * dsh-reference-session 宿主半（T5.1）。
+ * dsh-reference-session-collector 宿主半（T5.1）。
  *
  * - `export const inject = ['webServer']`（唯一声明；webStartup 不列，老线兼容
  *   ——trustedHosts 经 ctx.get 双名回退链 best-effort 读取）。
- * - 单条 fenced 路由 `GET/POST /api/dsh-reference-session`，op 分发
+ * - 单条 fenced 路由 `GET/POST /api/dsh-reference-session-collector`，op 分发
  *   status / sessions / session / surface / recall / search / sync。
  * - 双通道注册（direct `ctx.get` + `ctx.inject` 迟到臂），duplicate-route
  *   容错（同 lib 双挂载 = 成功），`ctx.effect` 注销。
@@ -61,7 +61,7 @@ import {
 export const inject = ['webServer']
 
 /** API 路由前缀（fenced 单条）。 */
-export const DRS_API_PATH = '/api/dsh-reference-session'
+export const DRS_API_PATH = '/api/dsh-reference-session-collector'
 
 /** 启动首轮同步延迟（ms）——让路给宿主冷启动。 */
 export const BOOT_SYNC_DELAY_MS = 2_500
@@ -317,7 +317,7 @@ export function apply(ctx: Context): void {
       const logger = (ctx as unknown as { logger?: { warn?: (m: string, ...a: unknown[]) => void; info?: (m: string, ...a: unknown[]) => void } }).logger
       if (level === 'warn' && typeof logger?.warn === 'function') logger.warn(message, ...args)
       else if (level === 'info' && typeof logger?.info === 'function') logger.info(message, ...args)
-      else console[level]('[dsh-reference-session]', message, ...args)
+      else console[level]('[dsh-reference-session-collector]', message, ...args)
     } catch { /* 日志面永不致命 */ }
   }
 
@@ -367,7 +367,7 @@ export function apply(ctx: Context): void {
       disposeInterval()
       store.close()
     }
-  }, 'dsh-reference-session: projection lifecycle')
+  }, 'dsh-reference-session-collector: projection lifecycle')
 
   // trustedHosts best-effort（双名回退链，属性/get 两层 safe；缺席=放行）。
   const readStartupFace = (): WebStartupLike | undefined => {
@@ -395,7 +395,7 @@ export function apply(ctx: Context): void {
       })
       registered = true
       if (typeof off === 'function') {
-        ctx.effect(() => off, 'dsh-reference-session: /api route unregister')
+        ctx.effect(() => off, 'dsh-reference-session-collector: /api route unregister')
       }
       log('info', 'drs api route registered (%s)', channel)
     } catch (error) {

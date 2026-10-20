@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 const dir = mkdtempSync(join(tmpdir(), 'drs-smoke-'))
-process.env['DSH_REFERENCE_SESSION_DIR'] = dir
+process.env['DSH_REFERENCE_SESSION_COLLECTOR_DIR'] = dir
 const m = await import('../lib/index.js')
 if (typeof m.apply !== 'function' || !Array.isArray(m.inject)) throw new Error('export face missing')
 const store = m.openProjectionStore(dir)
@@ -24,7 +24,7 @@ for (const fn of ctx.__effects) {
 }
 // client 半身横幅契约：ModuleLoader.load + id==包名
 const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-if (!client.includes('window.__ModuleLoader__.load') || !client.includes('"dsh-reference-session"')) {
+if (!client.includes('window.__ModuleLoader__.load') || !client.includes('"dsh-reference-session-collector"')) {
   throw new Error('client banner missing ModuleLoader.load or wrong id')
 }
 // 装机实锤回归：client 产物必须暴露 apply（空对象会触发宿主 invalid plugin）

@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-const ID = 'dsh-reference-session'
+const ID = 'dsh-reference-session-collector'
 
 export default defineConfig([
   // 主机半身：src/index.ts 产出 lib/index.js（ESM / node）。
