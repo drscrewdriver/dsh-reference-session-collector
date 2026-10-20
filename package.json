@@ -1,9 +1,9 @@
 {
   "name": "dsh-reference-session-collector",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.0",
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
-    "tag": "latest",
+    "tag": "beta",
     "access": "public"
   },
   "description": "DSH Web 插件：会话原文投影同步器（DRS）——只读扫描 ~/.dsh/sessions 会话日志，解码后投影进自有 SQLite（segments/replaces/FTS5），经 /api/dsh-reference-session-collector 提供 surface 标记、召回对账与内容检索面。绝不写会话文件。",
