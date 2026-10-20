@@ -1,7 +1,8 @@
 /**
- * 投影库装配（spec §DDL）：node:sqlite 四表一虚表 + WAL/mmap 缓存层 1 +
- * sessions 汇总常驻 Map（缓存层 2）。写纪律：每 session 全量重写式替换
- * （事务内 DELETE+INSERT），幂等。
+ * 投影库装配（spec §DDL）：node:sqlite 五表一虚表（sessions/segments/replaces/
+ * blocks/meta + segments_fts）+ WAL/mmap 缓存层 1 + sessions 汇总常驻 Map
+ * （缓存层 2）。写纪律：每 session 全量重写式替换（事务内 DELETE+INSERT），
+ * 幂等；字块一律走 blocks 字典 hash 引用（v5），脱敏派生臂同源生成。
  *
  * 本库只落在 ~/.dsh-reference-session-collector/projection.db ——绝不触碰会话文件。
  */
@@ -10,15 +11,19 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SessionProjection, SessionSummary } from './projection.ts'
 import { segmentForIndex } from './segment.ts'
+import { BlocksStore, BLOCKS_DDL } from './blocks.ts'
+import { redactSecrets } from './redact.ts'
 
 /** schema 版本（meta 表；断裂式迁移的比对基线）。
  * v2=加 sessions.format_generation；
- * v3=search_text 视界变更（剥离宿主注入样板段，strip-injected horizon v2）；
- * v4=账目双修（真机取证 2026-10-20）：① text/tokens 视界补 data.content 双臂
- *   （checkpoint 替身/用户消息旧视界全计 0）；② replaces 加 live 列——替身行
- *   被后续区间再覆盖时 delta 清除不入 gross（用户定标：checkpoint 只影响其后
- *   的积分）。旧行两项口径均错，整库清空重建（投影可重建，丢行无损）。 */
-export const PROJECTION_SCHEMA_VERSION = '4'
+ * v3=search_text 视界变更（剥离宿主注入样板段）；
+ * v4=账目双修（data.content 双臂 + replaces.live）；
+ * v5=字块共享 + 脱敏派生臂（2026-10-20 用户定标）：text/search_text/
+ *   surface_text 实列退役→blocks 字典 hash 引用（surface 经 replaced_by
+ *   链派生）；新 redacted_text_hash/redacted_search_text_hash（redactSecrets
+ *   派生臂，CCI 口径 text 的 token 数学不动）；旧库列形状断裂→DROP 重建
+ *   + VACUUM（投影可重建，丢行无损）。 */
+export const PROJECTION_SCHEMA_VERSION = '5'
 
 /** sessions 表原始行（snake_case 与 DDL 一致）。 */
 export interface SessionRow {
@@ -88,11 +93,12 @@ CREATE TABLE IF NOT EXISTS segments(
   session_id TEXT NOT NULL, seq INTEGER NOT NULL, turn INTEGER DEFAULT 0,
   step INTEGER DEFAULT 0, kind TEXT NOT NULL, role TEXT DEFAULT '',
   time INTEGER DEFAULT 0,
-  text TEXT DEFAULT '', tokens INTEGER DEFAULT 0,
-  search_text TEXT DEFAULT '',
+  text_hash TEXT, tokens INTEGER DEFAULT 0,
+  search_text_hash TEXT,
+  redacted_text_hash TEXT, redacted_search_text_hash TEXT,
   on_surface INTEGER DEFAULT 1,
   compressed INTEGER DEFAULT 0,
-  surface_text TEXT, surface_tokens INTEGER, replaced_by INTEGER,
+  surface_tokens INTEGER, replaced_by INTEGER,
   PRIMARY KEY(session_id, seq)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_segments_turn ON segments(session_id, turn, step);
 CREATE TABLE IF NOT EXISTS replaces(
@@ -107,6 +113,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
   index_text, session_id UNINDEXED, seq UNINDEXED, kind UNINDEXED,
   tokenize='unicode61');
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+${BLOCKS_DDL}
 `
 
 function summaryToRow(s: SessionSummary, artifactBytes: number, artifactMtimeMs: number, extra?: ReplaceSessionExtra): SessionRow {
@@ -150,32 +157,25 @@ PRAGMA cache_size=-32000;
 PRAGMA mmap_size=268435456;
 PRAGMA application_id=0x44525343;
 `)
-  db.exec(DDL)
-  // 断裂式迁移：旧库 schema_version 存在且与新串不同 → 整库清空（投影可重建）。
-  // v1→v2 时代旧库先补列再判（列检查幂等安全）。
-  const cols = db.prepare('PRAGMA table_info(sessions)').all() as unknown as { name: string }[]
-  if (!cols.some(c => c.name === 'format_generation')) {
-    db.exec('ALTER TABLE sessions ADD COLUMN format_generation INTEGER DEFAULT -1')
+  // 断裂式重置（v5 起）：旧库版本串不符 → 先 DROP 全建再跑 DDL（segments 列
+  // 形状断裂，ALTER 不可补；若先 DDL，legacy 旧表会让 CREATE INDEX 引用缺失列
+  // 直接炸）。重建后 VACUUM 一次回收碎片。投影可重建，丢行无损。
+  let previous: { value: string } | undefined
+  try {
+    previous = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined
+  } catch {
+    previous = undefined // 新库：meta 尚未存在
   }
-  // v3→v4 旧库补列（列检查幂等安全；行数据随后被版本重置清空）。
-  const repCols = db.prepare('PRAGMA table_info(replaces)').all() as unknown as { name: string }[]
-  if (!repCols.some(c => c.name === 'live')) {
-    db.exec('ALTER TABLE replaces ADD COLUMN live INTEGER NOT NULL DEFAULT 1')
-  }
-  const previous = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string } | undefined
   if (previous !== undefined && previous.value !== PROJECTION_SCHEMA_VERSION) {
-    db.exec('BEGIN')
-    try {
-      db.prepare('DELETE FROM sessions').run()
-      db.prepare('DELETE FROM segments').run()
-      db.prepare('DELETE FROM replaces').run()
-      db.prepare('DELETE FROM segments_fts').run()
-      db.exec('COMMIT')
-    } catch (error) {
-      db.exec('ROLLBACK')
-      throw error
-    }
+    db.exec(`DROP TABLE IF EXISTS segments_fts;
+             DROP TABLE IF EXISTS segments;
+             DROP TABLE IF EXISTS replaces;
+             DROP TABLE IF EXISTS sessions;
+             DROP TABLE IF EXISTS blocks;
+             DROP TABLE IF EXISTS meta`)
   }
+  db.exec(DDL)
+  if (previous !== undefined && previous.value !== PROJECTION_SCHEMA_VERSION) db.exec('VACUUM')
   db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
     .run('schema_version', PROJECTION_SCHEMA_VERSION)
 
@@ -188,9 +188,11 @@ PRAGMA application_id=0x44525343;
   loadAll()
 
   const insertSegment = db.prepare(`INSERT INTO segments(
-    session_id, seq, turn, step, kind, role, time, text, tokens, search_text,
-    on_surface, compressed, surface_text, surface_tokens, replaced_by)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    session_id, seq, turn, step, kind, role, time, text_hash, tokens, search_text_hash,
+    redacted_text_hash, redacted_search_text_hash,
+    on_surface, compressed, surface_tokens, replaced_by)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  const blocks = new BlocksStore(db)
   const insertReplace = db.prepare(`INSERT INTO replaces(
     session_id, seq, start_seq, end_seq, a_tokens, b_tokens, kind, turn, step, live)
     VALUES(?,?,?,?,?,?,?,?,?,?)`)
@@ -224,9 +226,14 @@ PRAGMA application_id=0x44525343;
         db.prepare('DELETE FROM replaces WHERE session_id=?').run(row.session_id)
         db.prepare('DELETE FROM segments_fts WHERE session_id=?').run(row.session_id)
         for (const seg of segments) {
+          // v5 写路径：原文/检索文入典（地面真值不动）；redacted 臂同源
+          // redactSecrets 派生——未命中行与原文同串同 hash，字典自动共块。
+          const redText = redactSecrets(seg.text).text
+          const redSearch = redactSecrets(seg.searchText).text
           insertSegment.run(row.session_id, seg.seq, seg.turn, seg.step, seg.kind, seg.role,
-            seg.time, seg.text, seg.tokens, seg.searchText, seg.onSurface, seg.compressed,
-            seg.surfaceText, seg.surfaceTokens, seg.replacedBy)
+            seg.time, blocks.ensure(seg.text), seg.tokens, blocks.ensure(seg.searchText),
+            blocks.ensure(redText), blocks.ensure(redSearch),
+            seg.onSurface, seg.compressed, seg.surfaceTokens, seg.replacedBy)
         }
         for (const rep of replaces) {
           insertReplace.run(row.session_id, rep.seq, rep.startSeq, rep.endSeq,
@@ -264,6 +271,7 @@ PRAGMA application_id=0x44525343;
         db.prepare('DELETE FROM segments_fts WHERE session_id=?').run(sessionId)
         db.prepare('DELETE FROM replaces WHERE session_id=?').run(sessionId)
         const head = db.prepare('DELETE FROM sessions WHERE session_id=?').run(sessionId)
+        // v5 纪律：blocks 只增不删（共享块归属不可知；字典体积有上界=语料 distinct 集）。
         db.exec('COMMIT')
         if (!existed && Number(head.changes ?? 0) === 0) return false
       } catch (error) {
