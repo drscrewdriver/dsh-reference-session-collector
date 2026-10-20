@@ -290,3 +290,23 @@
 - **装机状态**：local.9 tgz 已出，双 profile 安装待桌面 Electron 关停后执行
   （desktop profile 修改纪律）；旧陈旧投影无需手工清——装后首轮 interval 自动剪。
 
+
+## 改名轮 DRSC（2026-10-20，dsh-reference-session → dsh-reference-session-collector）
+
+- **动机**：与消费方三分支的「安装时依赖 collector」诉求合并处理；npm 双名
+  （旧/新）皆 E404 空位、旧名从未发布，纯本地盘切换零外部约束。
+- **切换面**：包名/manifest id/路由 /api/dsh-reference-session-collector/
+  env DSH_REFERENCE_SESSION_COLLECTOR_{DIR,SYNC_INTERVAL_MS}/数据目录
+  ~/.dsh-reference-session-collector（起新库不迁移，投影可重建）/app-id DRSS→DRSC。
+- **依赖声明通道**：npm peerDependencies 在 pnpm 工作区被 autoInstallPeers
+  强拉注册表（未发布=404 卡死装机，optional meta 也拦不住）——改用
+  package.json dsh.pluginDependencies:["dsh-reference-session-collector"]
+  声明（仿 dsh.client 先例），装机强校验在 apply-drsc.cjs（tgz 解包验声明
+  +profile 双闸），发布 npm 后可评估切回真 peers。
+- **版本**：collector 0.1.0-local.9（97/97）× steward 0.5.5-local.10（233+client）
+  × CCI selector 0.9.8-local.18（verify7+monitor44，bundle 零旧串）× memory
+  0.26.4-local.2（anchor 5/5）。web profile 已装验（旧名 deps+bundles 双清，
+  collector 四特征=true）；desktop 待 Electron 关停跑 apply-drsc.cjs。
+- **目录迁移事故记**：PowerShell Move-Item 移 pnpm 符号链接农场部分失败
+  （.git 过去了、src/tests/scripts 滞留旧目录）——逐目录补移修复，git 树
+  验证干净；教训=含 node_modules 的目录改名应先 rm node_modules 再 move。
