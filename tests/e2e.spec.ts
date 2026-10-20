@@ -115,4 +115,42 @@ describe('ProjectionSync × 真库端到端', () => {
     expect(store2.summaries.get('sess-e2e')?.event_count).toBe(5)
     store2.close()
   })
+
+  it('删除剪枝端到端（真身 store）：会话目录被删 → 下一轮四表零残留，幸存会话可检', async () => {
+    const store3 = openProjectionStore(libDir)
+    const sync3 = new ProjectionSync({
+      store: createStorePort(store3),
+      project: (events, options) => projectSessionEvents(events, {
+        dirId: options.dirId,
+        ...(options.header === undefined ? {} : { header: options.header }),
+      }),
+      counter: 'off',
+    })
+    // 造第二个会话并入库（带一行可检文本）
+    const doomedDir = join(home, 'sessions', 'slug', 'sess-doomed')
+    mkdirSync(doomedDir, { recursive: true })
+    const doomedLines = [
+      JSON.stringify({ type: 'session', version: 4, id: 'sess-doomed', cwd: '/tmp/e2e' }),
+      row(0, 'user/message', { content: [{ type: 'text', text: '注定被删的探针文本' }] }),
+    ]
+    writeFileSync(join(doomedDir, generationLogFilename(0, 'none')), doomedLines.join('\n') + '\n')
+    const seed = await sync3.syncAll({ dshHome: home })
+    expect(seed.updated).toBe(1)
+    expect(store3.summaries.has('sess-doomed')).toBe(true)
+
+    // 宿主删会话：目录消失 → 下一轮剪枝，WAL 事务级联清四表
+    rmSync(doomedDir, { recursive: true, force: true })
+    const res = await sync3.syncAll({ dshHome: home })
+    expect(res.pruned).toEqual(['sess-doomed'])
+    expect(store3.summaries.has('sess-doomed')).toBe(false)
+    for (const table of ['segments', 'segments_fts', 'replaces', 'sessions']) {
+      const n = store3.db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE session_id=?`).get('sess-doomed') as { c: number }
+      expect(n.c, `${table} 应零残留`).toBe(0)
+    }
+    // 幸存会话照常可检（sess-e2e 未被误伤）
+    const { createQueryContext, search } = await import('../src/surface.ts')
+    const hits = search(createQueryContext(store3), '端到端探针')
+    expect(hits.hits.length).toBeGreaterThan(0)
+    store3.close()
+  })
 })

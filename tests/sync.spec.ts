@@ -63,16 +63,19 @@ interface MockStore extends SyncStorePort {
   byDir: Map<string, { sessionId: string; artifactBytes: number; artifactMtimeMs: number; archived: number }>
   replaces: Array<{ projection: unknown; meta: SyncReplaceMeta }>
   archivedCalls: Array<[string, number]>
+  deletes: string[]
 }
 
 function createMockStore(): MockStore {
   const byDir = new Map<string, { sessionId: string; artifactBytes: number; artifactMtimeMs: number; archived: number }>()
   const replaces: Array<{ projection: unknown; meta: SyncReplaceMeta }> = []
   const archivedCalls: Array<[string, number]> = []
+  const deletes: string[] = []
   return {
     byDir,
     replaces,
     archivedCalls,
+    deletes,
     getSessionByDir(dirId) {
       const row = byDir.get(dirId)
       return row === undefined ? undefined : { ...row }
@@ -90,6 +93,17 @@ function createMockStore(): MockStore {
       archivedCalls.push([sessionId, archived])
       for (const row of byDir.values()) {
         if (row.sessionId === sessionId) row.archived = archived
+      }
+    },
+    listProjectedDirs() {
+      const out: { dirId: string; sessionId: string }[] = []
+      for (const [dirId, row] of byDir) out.push({ dirId, sessionId: row.sessionId })
+      return out
+    },
+    deleteSession(sessionId) {
+      deletes.push(sessionId)
+      for (const [dirId, row] of byDir) {
+        if (row.sessionId === sessionId) byDir.delete(dirId)
       }
     },
   }
@@ -374,5 +388,63 @@ describe('interval scheduling', () => {
     expect(resolveSyncIntervalMs({ [SYNC_INTERVAL_ENV]: 'abc' })).toBe(DEFAULT_SYNC_INTERVAL_MS)
     expect(resolveSyncIntervalMs({ [SYNC_INTERVAL_ENV]: '-3' })).toBe(DEFAULT_SYNC_INTERVAL_MS)
     expect(resolveSyncIntervalMs({ [SYNC_INTERVAL_ENV]: '  ' })).toBe(DEFAULT_SYNC_INTERVAL_MS)
+  })
+})
+
+describe('删除剪枝（被 session 删除的会话→WAL 级联清对应 uuid，2026-10-20 用户定标）', () => {
+  it('磁盘目录消失的会话下一轮被剪枝：deleteSession 收到其 sessionId，pruned 如实报告，幸存会话不动', async () => {
+    const dshHome = makeDshHome()
+    const dirA = writeSessionFixture(dshHome, 'sess-a', HEADER_A, EVENTS_A)
+    writeSessionFixture(dshHome, 'sess-b', { type: 'session', id: 'sess-b', version: 3, cwd: 'E:/tmp/proj' }, EVENTS_A)
+    const store = createMockStore()
+    const projection = createMockProjection()
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+    const first = await sync.syncAll({ dshHome })
+    expect(first.updated).toBe(2)
+    expect(first.pruned).toEqual([])
+
+    // 宿主删会话：目录整体消失（append-only 文件没了就是没了）。
+    rmSync(dirA, { recursive: true, force: true })
+    const second = await sync.syncAll({ dshHome })
+    expect(second.totalDiscovered).toBe(1)
+    expect(second.pruned).toEqual(['sess-a'])
+    expect(store.deletes).toEqual(['sess-a'])
+    expect(store.byDir.has('sess-a')).toBe(false)
+    expect(store.byDir.has('sess-b')).toBe(true)
+  })
+
+  it('sessions 根缺失=守护不动手：宁留陈旧行绝不误删全集', async () => {
+    const dshHome = makeDshHome()
+    writeSessionFixture(dshHome, 'sess-a', HEADER_A, EVENTS_A)
+    const store = createMockStore()
+    const projection = createMockProjection()
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+    await sync.syncAll({ dshHome })
+    expect(store.byDir.size).toBe(1)
+
+    // 整个 sessions 目录消失（挂盘故障/被搬走）——不是「所有会话都删了」的信号。
+    rmSync(join(dshHome, 'sessions'), { recursive: true, force: true })
+    const res = await sync.syncAll({ dshHome })
+    expect(res.totalDiscovered).toBe(0)
+    expect(res.pruned).toEqual([])
+    expect(store.deletes).toEqual([])
+    expect(store.byDir.size).toBe(1)
+  })
+
+  it('发现被 limit 截断=守护不动手（未看得见的会话不能当作已删）', async () => {
+    const dshHome = makeDshHome()
+    writeSessionFixture(dshHome, 'sess-a', HEADER_A, EVENTS_A)
+    writeSessionFixture(dshHome, 'sess-b', { type: 'session', id: 'sess-b', version: 3, cwd: 'E:/tmp' }, EVENTS_A)
+    const store = createMockStore()
+    const projection = createMockProjection()
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+    const full = await sync.syncAll({ dshHome })
+    expect(full.updated).toBe(2)
+
+    // limit=1：只发现一个——另一个虽不在 alive 集但发现被截断，不得剪。
+    const res = await sync.syncAll({ dshHome, limit: 1 })
+    expect(res.totalDiscovered).toBe(1)
+    expect(res.pruned).toEqual([])
+    expect(store.deletes).toEqual([])
   })
 })

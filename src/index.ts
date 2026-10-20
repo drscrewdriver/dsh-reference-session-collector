@@ -127,6 +127,16 @@ export function createStorePort(store: ProjectionStore): SyncStorePort {
     setSessionArchived(sessionId: string, archived: number): void {
       store.setArchived(sessionId, archived === 1 ? 1 : 0)
     },
+    listProjectedDirs(): { dirId: string; sessionId: string }[] {
+      const out: { dirId: string; sessionId: string }[] = []
+      for (const row of store.summaries.values()) {
+        out.push({ dirId: row.dir_id, sessionId: row.session_id })
+      }
+      return out
+    },
+    deleteSession(sessionId: string): void {
+      store.deleteSession(sessionId)
+    },
   }
 }
 

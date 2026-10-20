@@ -61,6 +61,12 @@ export interface ProjectionStore {
   replaceSession(projection: SessionProjection, artifactBytes: number, artifactMtimeMs: number, extra?: ReplaceSessionExtra): void
   /** 翻转归档旗标（不动投影内容）。 */
   setArchived(sessionId: string, archived: 0 | 1): void
+  /**
+   * 级联清除一个会话的全部投影（删除剪枝专用，2026-10-20 用户定标）：
+   * WAL 事务内删 segments/segments_fts/replaces/sessions 四表，提交后摘
+   * 常驻 Map；会话不存在返回 false（幂等，不抛）。投影可重建，删行无损。
+   */
+  deleteSession(sessionId: string): boolean
   close(): void
 }
 
@@ -249,6 +255,24 @@ PRAGMA application_id=0x44525353;
       if (current !== undefined && current.archived === archived) return
       db.prepare('UPDATE sessions SET archived=? WHERE session_id=?').run(archived, sessionId)
       if (current !== undefined) summaries.set(sessionId, { ...current, archived })
+    },
+    deleteSession(sessionId) {
+      const existed = summaries.has(sessionId)
+      db.exec('BEGIN')
+      try {
+        db.prepare('DELETE FROM segments WHERE session_id=?').run(sessionId)
+        db.prepare('DELETE FROM segments_fts WHERE session_id=?').run(sessionId)
+        db.prepare('DELETE FROM replaces WHERE session_id=?').run(sessionId)
+        const head = db.prepare('DELETE FROM sessions WHERE session_id=?').run(sessionId)
+        db.exec('COMMIT')
+        if (!existed && Number(head.changes ?? 0) === 0) return false
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+      // 缓存层 2：提交后摘常驻行；LRU 台账由 synced_at 代际键自然失效（查不到会话=不再命中）。
+      summaries.delete(sessionId)
+      return true
     },
     close() {
       db.close()

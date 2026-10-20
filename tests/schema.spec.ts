@@ -97,4 +97,41 @@ describe('openProjectionStore / replaceSession', () => {
     }
     rmSync(legacyDir, { recursive: true, force: true })
   })
+
+  it('deleteSession 级联清除四表+常驻 Map；不存在幂等 false；幸存会话无损', () => {
+    const delDir = mkdtempSync(join(tmpdir(), 'drs-del-'))
+    try {
+      const store = openProjectionStore(delDir)
+      try {
+        const doomed = projectSessionEvents(events, { dirId: 'dX', sessionId: 'sX' })
+        const survivor = projectSessionEvents(events, { dirId: 'dY', sessionId: 'sY' })
+        store.replaceSession(doomed, 1, 1)
+        store.replaceSession(survivor, 1, 1)
+        expect(store.deleteSession('sX')).toBe(true)
+        for (const table of ['segments', 'segments_fts', 'replaces', 'sessions']) {
+          const n = store.db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE session_id=?`).get('sX') as { c: number }
+          expect(n.c, `${table} 应零残留`).toBe(0)
+        }
+        expect(store.summaries.has('sX')).toBe(false)
+        // 幸存面完好：另一会话四表行+Map 都在
+        expect(store.summaries.has('sY')).toBe(true)
+        expect((store.db.prepare('SELECT COUNT(*) AS c FROM segments WHERE session_id=?').get('sY') as { c: number }).c).toBe(2)
+        // 幂等：重复删/删不存在 → false 不抛
+        expect(store.deleteSession('sX')).toBe(false)
+        expect(store.deleteSession('s-none')).toBe(false)
+      } finally {
+        store.close()
+      }
+      // 重开库：sX 确实没复活（写已随 WAL 提交，非仅 Map 摘除）
+      const reopened = openProjectionStore(delDir)
+      try {
+        expect(reopened.summaries.has('sX')).toBe(false)
+        expect(reopened.summaries.has('sY')).toBe(true)
+      } finally {
+        reopened.close()
+      }
+    } finally {
+      rmSync(delDir, { recursive: true, force: true })
+    }
+  })
 })

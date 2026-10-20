@@ -164,7 +164,7 @@ export interface SyncReplaceMeta {
 
 /**
  * 投影库端口。真身 = schema.ts 的 ProjectionStore(L1);单测注入内存 mock。
- * 三个方法恰好是 sync 需要的全部写/读面——真身实现不得要求更多。
+ * 五个方法恰好是 sync 需要的全部写/读面——真身实现不得要求更多。
  */
 export interface SyncStorePort {
   /** 目录水位预查(stat 命中免解码的关键);无记录返回 undefined。 */
@@ -173,6 +173,10 @@ export interface SyncStorePort {
   replaceSession(projection: unknown, meta: SyncReplaceMeta): void
   /** 仅翻归档旗标(stat 命中的会话随归档集变更走这里,免解码)。 */
   setSessionArchived(sessionId: string, archived: number): void
+  /** 已投影名册枚举(删除剪枝对照面):dirId=发现键,sessionId=删除键。 */
+  listProjectedDirs(): { dirId: string; sessionId: string }[]
+  /** 级联清除一个会话的投影(WAL 事务内 segments/fts/replaces/sessions 四表+常驻 Map)。 */
+  deleteSession(sessionId: string): void
 }
 
 export type SyncLog = (level: 'info' | 'warn', message: string, ...args: unknown[]) => void
@@ -210,6 +214,12 @@ export interface SyncResult {
   skipped: number
   softSkips: SyncSoftSkip[]
   failures: SyncFailure[]
+  /**
+   * 本轮被删除剪枝的 sessionId 列表:宿主删会话=磁盘目录消失,投影绝不
+   * 留陈旧行(真身 deleteSession 走 WAL 事务级联清四表)。守护条件见
+   * syncAll 剪枝段——sessions 根缺失或发现截断时**不动手**。
+   */
+  pruned: string[]
   basis: SyncBasis
   durationMs: number
 }
@@ -223,6 +233,7 @@ function emptyResult(busy: boolean, basis: SyncBasis): SyncResult {
     skipped: 0,
     softSkips: [],
     failures: [],
+    pruned: [],
     basis,
     durationMs: 0,
   }
@@ -282,12 +293,13 @@ export class ProjectionSync {
     try {
       const dshHome = resolveDshHome(input.dshHome)
       const archivedSet = readArchivedSessionIds(dshHome)
-      const discovered = discoverSessionLogs(dshHome, input.limit)
+      const limit = input.limit ?? DISCOVERY_LIMIT
+      const discovered = discoverSessionLogs(dshHome, limit)
       const exact = this.counterMode === 'off' ? undefined : resolveExactCounter()
       const basis: SyncBasis = exact !== undefined ? 'ds-token' : 'chars/4'
       const result: SyncResult = {
         ok: true, busy: false, totalDiscovered: discovered.length,
-        updated: 0, skipped: 0, softSkips: [], failures: [], basis, durationMs: 0,
+        updated: 0, skipped: 0, softSkips: [], failures: [], pruned: [], basis, durationMs: 0,
       }
       for (const found of discovered) {
         try {
@@ -300,6 +312,29 @@ export class ProjectionSync {
         }
         // 让路(回填同款):每会话一片,宿主主线程可插话。
         await new Promise<void>(resolve => { setImmediate(resolve) })
+      }
+      // 删除剪枝(2026-10-20 用户定标):被宿主删掉的会话目录=UUID 级联清除
+      // 对应投影,WAL 事务里删 segments/segments_fts/replaces/sessions 四表。
+      // 守护:sessions 根缺失(整目录被搬走/挂盘故障)或发现被 limit 截断时
+      // 不动手——宁可留陈旧行,绝不误删全集。
+      const sessionsRootExists = existsSync(join(dshHome, 'sessions'))
+      const discoveryTruncated = discovered.length >= limit
+      if (sessionsRootExists && !discoveryTruncated) {
+        const aliveDirs = new Set(discovered.map(found => found.dirSessionId))
+        for (const projected of this.store.listProjectedDirs()) {
+          if (aliveDirs.has(projected.dirId)) continue
+          try {
+            this.store.deleteSession(projected.sessionId)
+            result.pruned.push(projected.sessionId)
+            this.log('info', 'drs sync: pruned deleted session %s (dir %s gone)',
+              projected.sessionId, projected.dirId)
+          } catch (error) {
+            result.failures.push({
+              sessionId: projected.sessionId,
+              error: `prune failed: ${String((error as Error)?.message ?? error)}`,
+            })
+          }
+        }
       }
       result.durationMs = Date.now() - startedAt
       this.lastResult = result
