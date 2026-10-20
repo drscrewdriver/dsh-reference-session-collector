@@ -310,3 +310,23 @@
 - **目录迁移事故记**：PowerShell Move-Item 移 pnpm 符号链接农场部分失败
   （.git 过去了、src/tests/scripts 滞留旧目录）——逐目录补移修复，git 树
   验证干净；教训=含 node_modules 的目录改名应先 rm node_modules 再 move。
+
+## M1 v5 基座轮（2026-10-20，drsc-redact-memory-wiring 泳道 M1，分支 feat/schema-v5-blocks @4840c28）
+
+- **范围**：task_1-9 全绿——vendor redact.ts（9776B 逐字节 diff=0，第五回搬件）+
+  redact.spec（仅改导入路径）；blocks.ts sha256 全串字典（INSERT OR IGNORE、
+  空文→null、BLOCKS_DDL 单源）；schema v5：segments text/search_text/
+  surface_text 实列退役→四 hash 引用列 + redacted_* 派生臂；投影写路径
+  redactSecrets→ensureBlock×4；定向 38/38 + tsc/lint 零错。
+- **实施期真 bug（已修+入测）**：断裂重置若放在 DDL 之后，v4 旧表的
+  `CREATE INDEX ... ON segments(turn)` 缺列直接炸——**重置必须前置于 DDL**；
+  VACUUM 只在重置分支跑（常规开库零开销）。
+- **关键不变式（G3 联调地基）**：①未命中行 redacted 与原文同 hash → 字典
+  零新增（实测两同文会话 blocks 计数不动）；②链头行 text_hash 的块正文 ==
+  投影 surfaceText → M2 两跳 JOIN 恒带 session_id 即无损还原（双会话同 seq
+  撞键压测钉死）；③tokens/gross/live 数值列零变化 = CCI verify 口径地基。
+- **设计内红**：surface/route/e2e 三套件读旧列报错（no such column）——M2
+  领地，分支合并前 G4 不承诺全量 check；main 仍在 v4 零污染。
+- **路线定档**：G1 wire 契约✓ + G2 DDL 冻结✓ → M2（task_10-15，独占
+  surface/index 路由段/sync）与 M3（memory 写停+水位+DrscClient，异仓并行）
+  可同时起飞；M4 task_24 基线回归可现跑。
