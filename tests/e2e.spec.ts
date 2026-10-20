@@ -92,9 +92,14 @@ describe('ProjectionSync × 真库端到端', () => {
     expect(store.summaries.get('sess-e2e')?.archived).toBe(1)
 
     // 真库检索面：中文查询命中（fts 由 replaceSession 直插）
-    const { createQueryContext, search } = await import('../src/surface.ts')
+    const { createQueryContext, search, sessionDetail } = await import('../src/surface.ts')
     const hits = search(createQueryContext(store), '端到端探针')
     expect(hits.hits.length).toBeGreaterThan(0)
+    // tail 与会话文件真实尾部对拍：日志末行 seq=3（text='p'）即尾窗唯一行
+    const tail = sessionDetail(createQueryContext(store), 'sess-e2e', { tail: 1 }).rows as Record<string, unknown>[]
+    expect(tail).toHaveLength(1)
+    expect(Number(tail[0]!['seq'])).toBe(3)
+    expect(String(tail[0]!['text'])).toBe('p')
     store.close()
   })
 

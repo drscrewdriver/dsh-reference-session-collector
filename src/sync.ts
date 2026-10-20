@@ -164,7 +164,7 @@ export interface SyncReplaceMeta {
 
 /**
  * 投影库端口。真身 = schema.ts 的 ProjectionStore(L1);单测注入内存 mock。
- * 五个方法恰好是 sync 需要的全部写/读面——真身实现不得要求更多。
+ * 七个方法恰好是 sync 需要的全部写/读面——真身实现不得要求更多。
  */
 export interface SyncStorePort {
   /** 目录水位预查(stat 命中免解码的关键);无记录返回 undefined。 */
@@ -177,6 +177,14 @@ export interface SyncStorePort {
   listProjectedDirs(): { dirId: string; sessionId: string }[]
   /** 级联清除一个会话的投影(WAL 事务内 segments/fts/replaces/sessions 四表+常驻 Map)。 */
   deleteSession(sessionId: string): void
+  /**
+   * R5(v5 字块字典水位):current=blocks 现 max(rowid, 空典=0),
+   * last=上轮持久化值(meta 缺失=0)。current<last=字典被清/换——
+   * hash 引用悬空,stat 命中也不得 skip(防静默缺块)。
+   */
+  blocksWatermark(): { current: number; last: number }
+  /** 轮尾持久化本轮字典水位(下轮 skip 判定基线)。 */
+  setBlocksWatermark(value: number): void
 }
 
 export type SyncLog = (level: 'info' | 'warn', message: string, ...args: unknown[]) => void
@@ -252,6 +260,8 @@ interface SyncOneContext {
   archivedSet: ReadonlySet<string>
   exact: CanonicalTextTokenCounter | undefined
   result: SyncResult
+  /** R5:本轮字典水位倒退(清/换)——stat 命中也强制重投。 */
+  dictEvicted: boolean
 }
 
 export class ProjectionSync {
@@ -297,13 +307,17 @@ export class ProjectionSync {
       const discovered = discoverSessionLogs(dshHome, limit)
       const exact = this.counterMode === 'off' ? undefined : resolveExactCounter()
       const basis: SyncBasis = exact !== undefined ? 'ds-token' : 'chars/4'
+      // R5 水位对照:字典条目比上轮持久化时少=发生过驱逐(清典/换典)，
+      // 而 artifact 的 size/mtime 未变——纯 stat skip 会留下悬空 hash 引用。
+      const dict = this.store.blocksWatermark()
+      const dictEvicted = dict.current < dict.last
       const result: SyncResult = {
         ok: true, busy: false, totalDiscovered: discovered.length,
         updated: 0, skipped: 0, softSkips: [], failures: [], pruned: [], basis, durationMs: 0,
       }
       for (const found of discovered) {
         try {
-          this.syncOne(found, { archivedSet, exact, result })
+          this.syncOne(found, { archivedSet, exact, result, dictEvicted })
         } catch (error) {
           result.failures.push({
             sessionId: found.dirSessionId,
@@ -337,6 +351,8 @@ export class ProjectionSync {
         }
       }
       result.durationMs = Date.now() - startedAt
+      // R5:轮尾持久化水位(重投已使字典增长;取循环后的现值写入)。
+      this.store.setBlocksWatermark(this.store.blocksWatermark().current)
       this.lastResult = result
       return result
     } finally {
@@ -346,7 +362,8 @@ export class ProjectionSync {
 
   private syncOne(found: DiscoveredSessionLog, ctx: SyncOneContext): void {
     const record = this.store.getSessionByDir(found.dirSessionId)
-    const statHit = record !== undefined
+    const statHit = !ctx.dictEvicted
+      && record !== undefined
       && record.artifactBytes === found.artifact.bytes
       && record.artifactMtimeMs === found.artifact.mtimeMs
     // 归档翻转对 stat 命中的会话照常生效(免解码;新落库会话随 meta 携带)。

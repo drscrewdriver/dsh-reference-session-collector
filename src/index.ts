@@ -104,6 +104,9 @@ function isTrustedRequest(req: IncomingMessage, trustedHosts: readonly string[] 
   return trustedHosts.some(trusted => trusted.toLowerCase() === host.toLowerCase())
 }
 
+/** R5 水位在 meta 表的键（DDL 冻结不动，kv 面落）。 */
+const BLOCKS_WATERMARK_META_KEY = 'blocks_watermark'
+
 /** sync 端口 → ProjectionStore 真身适配（dir 水位经常驻 Map 扫描）。 */
 export function createStorePort(store: ProjectionStore): SyncStorePort {
   return {
@@ -137,6 +140,16 @@ export function createStorePort(store: ProjectionStore): SyncStorePort {
     deleteSession(sessionId: string): void {
       store.deleteSession(sessionId)
     },
+    blocksWatermark(): { current: number; last: number } {
+      const current = Number((store.db.prepare('SELECT COALESCE(MAX(rowid), 0) AS m FROM blocks').get() as { m: number | bigint }).m)
+      const row = store.db.prepare('SELECT value FROM meta WHERE key=?').get(BLOCKS_WATERMARK_META_KEY) as { value: string } | undefined
+      const parsed = row === undefined ? 0 : Number(row.value)
+      return { current, last: Number.isFinite(parsed) ? parsed : 0 }
+    },
+    setBlocksWatermark(value: number): void {
+      store.db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .run(BLOCKS_WATERMARK_META_KEY, String(value))
+    },
   }
 }
 
@@ -163,6 +176,22 @@ function resolveLatestSessionId(query: QueryContext): string | undefined {
     }
   }
   return bestId
+}
+
+/**
+ * v5 参数解析（R3/R4）：`redact` 仅 '1' 为真，其余/非法=0（缺省原文臂）；
+ * `tail` 正整数生效，非法/≤0=忽略（全量）。
+ */
+function parseRedact(url: URL): boolean {
+  return url.searchParams.get('redact') === '1'
+}
+
+function parseTail(url: URL): number | undefined {
+  const raw = url.searchParams.get('tail')
+  if (raw === null) return undefined
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+  return Math.floor(parsed)
 }
 
 /**
@@ -216,9 +245,13 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
       }
       const turn = url.searchParams.get('turn') ?? undefined
       const fields = url.searchParams.get('fields') ?? undefined
+      const redact = parseRedact(url)
+      const tail = parseTail(url)
       const detail = sessionDetail(deps.query, sessionId, {
         ...(turn === undefined ? {} : { turn }),
         ...(fields === undefined ? {} : { fields }),
+        ...(tail === undefined ? {} : { tail }),
+        ...(redact ? { redact: true } : {}),
       })
       if (detail.session === undefined) {
         writeJson(res, 200, { ok: true, session: null, rows: [] })
@@ -257,6 +290,7 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
         writeJson(res, 400, { ok: false, error: 'q parameter required' })
         return
       }
+      const redact = parseRedact(url)
       // 分组臂（steward 直连）：group=session 时走 searchGrouped，参数见
       // GroupedSearchRequest；缺省仍为逐文档平铺命中（CCI/既有调用不变）。
       if (url.searchParams.get('group') === 'session') {
@@ -275,6 +309,7 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
           ...(url.searchParams.get('surface') === '0' ? { surfaceOnly: false } : {}),
           ...(url.searchParams.get('sort') === 'time' ? { sortBy: 'time' as const } : {}),
           ...(limitRaw !== null && Number.isFinite(Number(limitRaw)) ? { limit: Number(limitRaw) } : {}),
+          ...(redact ? { redact: true } : {}),
         })
         writeJson(res, 200, { ok: true, ...grouped })
         return
@@ -283,6 +318,7 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
       writeJson(res, 200, { ok: true, ...search(deps.query, q, {
         ...(sessionId === '' ? {} : { session: sessionId }),
         ...(limitRaw === null ? {} : { limit: Number(limitRaw) }),
+        ...(redact ? { redact: true } : {}),
       }) })
       return
     }

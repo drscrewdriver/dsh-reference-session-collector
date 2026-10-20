@@ -1,6 +1,8 @@
 /**
  * T4.2 查询面断言:种子库 → 六查询形状/数学断言 + LRU 命中计数 +
- * 重同步后代际失效 + turn 过滤 + 中文查询命中 index_text。
+ * 重同步后代际失效 + turn 过滤 + 中文查询命中 index_text;
+ * v5 读侧(task_13):hash→blocks 还原的 v4 逐字段回归、redact=1 双态、
+ * surface 两跳派生对拍、tail=N 尾窗。
  *
  * 种子纪律:手工构造 SessionProjection 走 schema.replaceSession 真身落库,
  * **不依赖 projection.ts 的实现**——surface(L2)对投影核心(L3)只认库形状;
@@ -142,7 +144,7 @@ describe('status / listSessions(缓存层 2)', () => {
     expect(report['sessions']).toBe(2)
     expect(report['segments']).toBe(6)
     expect(report['replaces']).toBe(2)
-    expect(report['schema_version']).toBe('4')
+    expect(report['schema_version']).toBe('5')
     const cache = report['cache'] as Record<string, unknown>
     expect(cache['summaries']).toBe(2)
     expect(cache['surface_ledger']).toHaveProperty('hits')
@@ -201,8 +203,11 @@ describe('surfaceLedger(R3 台账 + 缓存层 3)', () => {
     expect(seqs(pointers)).toEqual([2, 3])
     expect(pointers[0]?.['replaced_by']).toBe(5)
     expect(pointers[0]?.['surface_tokens']).toBe(3)
+    // v5 两跳派生对拍:还原值 == v4 直存的种子 surfaceText
+    expect(pointers[0]?.['surface_text']).toBe('numbers: 42')
     expect(pointers[1]?.['replaced_by']).toBe(6)
     expect(pointers[1]?.['surface_tokens']).toBe(85)
+    expect(pointers[1]?.['surface_text']).toBe('召回扩写后的全文回读')
 
     const statsAfterFirst = ctx.surfaceLru.stats()
     expect(statsAfterFirst.misses).toBe(1)
@@ -368,5 +373,140 @@ describe('buildSearchSnippet(锚定节选)', () => {
     const text = 'y'.repeat(400)
     const out = buildSearchSnippet(text, '查不到的词')
     expect(out).toBe(`${'y'.repeat(240)}…`)
+  })
+})
+
+describe('v5 读侧（redact=1 双态 / tail 尾窗 / v4 逐字段回归 / 多跳链派生）', () => {
+  let v5dir = ''
+  let v5store: ProjectionStore
+  let v5ctx: QueryContext
+  const SECRET = 'sk-abcdefghijklmnop1234567890'
+
+  beforeAll(() => {
+    v5dir = mkdtempSync(join(tmpdir(), 'drs-v5face-'))
+    v5store = openProjectionStore(v5dir)
+    // 多跳链种子：2→4→5 在投影期已收敛——行面 replacedBy 直指终替 5，
+    // 读侧两跳还原结果必须等于 v4 直存的 surfaceText。
+    v5store.replaceSession({
+      summary: summary({ sessionId: 's9', dirId: 'd9' }),
+      segments: [
+        segment({ seq: 1, kind: 'user/message', role: 'user', time: 2001, text: `轮换令牌 ${SECRET} 请核对`, tokens: 5, searchText: `轮换令牌 ${SECRET} 请核对` }),
+        segment({ seq: 2, kind: 'tool/result', time: 2002, text: 'OUT BIG PAYLOAD 原文正文', tokens: 9, searchText: 'OUT BIG PAYLOAD 原文正文', onSurface: 0, compressed: 1, surfaceText: '收敛后的尾正文', surfaceTokens: 4, replacedBy: 5 }),
+        segment({ seq: 4, kind: 'system/op', time: 2003, text: '中段正文', tokens: 2, searchText: '中段正文', onSurface: 0, compressed: 1, surfaceText: '收敛后的尾正文', surfaceTokens: 4, replacedBy: 5 }),
+        segment({ seq: 5, kind: 'system/op', time: 2004, text: '收敛后的尾正文', tokens: 4, searchText: '收敛后的尾正文' }),
+      ],
+      replaces: [replace({ seq: 5, startSeq: 2, endSeq: 4, aTokens: 11, bTokens: 4, kind: 'compress' })],
+    }, 33, 3000)
+    // 撞键防御种子：s10 用同 seq 空间(2→5)但链头正文不同——两跳 JOIN 若漏
+    // session_id 条件就会串块（findings 风险①的读侧盖）。
+    v5store.replaceSession({
+      summary: summary({ sessionId: 's10', dirId: 'd10' }),
+      segments: [
+        segment({ seq: 2, kind: 'tool/result', time: 2102, text: 's10 中段载荷', tokens: 3, searchText: 's10 中段载荷', onSurface: 0, compressed: 1, surfaceText: '十字会话专属尾正文', surfaceTokens: 5, replacedBy: 5 }),
+        segment({ seq: 5, kind: 'system/op', time: 2104, text: '十字会话专属尾正文', tokens: 5, searchText: '十字会话专属尾正文' }),
+      ],
+      replaces: [replace({ seq: 5, startSeq: 2, endSeq: 2, aTokens: 3, bTokens: 5, kind: 'recall' })],
+    }, 44, 3100)
+    v5ctx = createQueryContext(v5store)
+  })
+
+  afterAll(() => {
+    v5store.close()
+    rmSync(v5dir, { recursive: true, force: true })
+  })
+
+  it('缺省臂：行面与 v4 逐字段同形（15 列同序），text 经 blocks 还原原文', () => {
+    const rows = sessionDetail(v5ctx, 's9').rows as Record<string, unknown>[]
+    expect(rows.map(row => Number(row['seq']))).toEqual([1, 2, 4, 5])
+    expect(Object.keys(rows[0]!)).toEqual([
+      'session_id', 'seq', 'turn', 'step', 'kind', 'role', 'time', 'text', 'tokens',
+      'search_text', 'on_surface', 'compressed', 'surface_text', 'surface_tokens', 'replaced_by',
+    ])
+    expect(String(rows[0]!['text'])).toContain(SECRET)
+    expect(rows[0]!['surface_text']).toBeNull()
+    expect(rows[1]!['surface_text']).toBe('收敛后的尾正文')
+  })
+
+  it('redact=1 臂：text/search_text 切 redacted 列，原密钥零残留；未命中行同串共块', () => {
+    const red = sessionDetail(v5ctx, 's9', { redact: true }).rows as Record<string, unknown>[]
+    expect(String(red[0]!['text'])).toContain('[REDACTED:API_KEY]')
+    expect(String(red[0]!['text'])).not.toContain(SECRET)
+    expect(String(red[0]!['search_text'])).not.toContain(SECRET)
+    // 派生 surface_text 同步切链头 redacted 列（尾行未命中→与原文同块同值）
+    expect(String(red[1]!['surface_text'])).toBe('收敛后的尾正文')
+    // 两臂同 15 列同序（字段名不随 redact 变）
+    expect(Object.keys(red[0]!)).toEqual([
+      'session_id', 'seq', 'turn', 'step', 'kind', 'role', 'time', 'text', 'tokens',
+      'search_text', 'on_surface', 'compressed', 'surface_text', 'surface_tokens', 'replaced_by',
+    ])
+  })
+
+  it('surface 两跳派生：多跳链台账指针直接给终替正文；台账臂恒原文', () => {
+    const ledger = surfaceLedger(v5ctx, 's9')
+    const pointers = ledger['compressed_pointers'] as Record<string, unknown>[]
+    expect(pointers.map(p => Number(p['seq']))).toEqual([2, 4])
+    expect(pointers[0]!['surface_text']).toBe('收敛后的尾正文')
+    expect(pointers[1]!['surface_text']).toBe('收敛后的尾正文')
+    expect(seqs(ledger['on_surface'] as unknown[])).toEqual([1, 5])
+    const head = (ledger['on_surface'] as Record<string, unknown>[])[0]!
+    expect(String(head['text'])).toContain(SECRET)
+  })
+
+  it('双会话同 seq 撞键防御（读侧）：s9/s10 各自链头各自还原，JOIN 不串块', () => {
+    const l10 = surfaceLedger(v5ctx, 's10')
+    const p10 = l10['compressed_pointers'] as Record<string, unknown>[]
+    expect(p10.map(p => Number(p['seq']))).toEqual([2])
+    expect(p10[0]!['surface_text']).toBe('十字会话专属尾正文')
+    // s9 同 seq(2→5) 的派生值不受 s10 影响（两跳均带 session_id）
+    const p9 = (surfaceLedger(v5ctx, 's9')['compressed_pointers'] as Record<string, unknown>[])[0]!
+    expect(p9['surface_text']).toBe('收敛后的尾正文')
+    // 明细臂同面：s10 行面只含自身会话 id
+    const rows10 = sessionDetail(v5ctx, 's10').rows as Record<string, unknown>[]
+    expect(rows10.every(row => row['session_id'] === 's10')).toBe(true)
+  })
+
+  it('tail=N：尾窗 N 行升序；超行数=全量；非法(0/NaN)=忽略；与 turn 过滤先滤后取尾', () => {
+    expect(seqs(sessionDetail(v5ctx, 's9', { tail: 2 }).rows as unknown[])).toEqual([4, 5])
+    expect(seqs(sessionDetail(v5ctx, 's9', { tail: 99 }).rows as unknown[])).toEqual([1, 2, 4, 5])
+    expect(seqs(sessionDetail(v5ctx, 's9', { tail: 0 }).rows as unknown[])).toEqual([1, 2, 4, 5])
+    expect(seqs(sessionDetail(v5ctx, 's9', { tail: Number.NaN }).rows as unknown[])).toEqual([1, 2, 4, 5])
+    expect(seqs(sessionDetail(v5ctx, 's9', { turn: '1', tail: 1 }).rows as unknown[])).toEqual([5])
+    expect(seqs(sessionDetail(v5ctx, 's9', { turn: '9', tail: 3 }).rows as unknown[])).toEqual([])
+  })
+
+  it('tail×redact 组合：尾窗行面与全量 redact 臂同窗同值（两参正交不打折）', () => {
+    const fullRed = sessionDetail(v5ctx, 's9', { redact: true }).rows as Record<string, unknown>[]
+    const tailRed = sessionDetail(v5ctx, 's9', { tail: 2, redact: true }).rows as Record<string, unknown>[]
+    expect(tailRed).toEqual(fullRed.slice(-2))
+    const wholeRed = sessionDetail(v5ctx, 's9', { tail: 99, redact: true }).rows as Record<string, unknown>[]
+    expect(wholeRed).toEqual(fullRed)
+  })
+
+  it('search 双态：fts 仍索引原文，两臂命中/排序一致；snippet 取材列随 redact 切', () => {
+    const plain = search(v5ctx, '轮换令牌')
+    expect(plain.hits.map(hit => `${hit['session_id']}#${hit['seq']}`)).toContain('s9#1')
+    expect(String(plain.hits[0]!['snippet'])).toContain(SECRET)
+    const red = search(v5ctx, '轮换令牌', { redact: true })
+    expect(red.hits.map(hit => `${hit['session_id']}#${hit['seq']}`))
+      .toEqual(plain.hits.map(hit => `${hit['session_id']}#${hit['seq']}`))
+    expect(String(red.hits[0]!['snippet'])).not.toContain(SECRET)
+    expect(String(red.hits[0]!['snippet'])).toContain('[REDACTED:API_KEY]')
+  })
+
+  it('searchGrouped redact 臂：snippet 锚定文本切 redacted，命中/权重不变', () => {
+    const plain = searchGrouped(v5ctx, { query: '轮换令牌' })
+    expect(plain.hits.map(hit => `${hit.session_id}#${hit.seq}`)).toEqual(['s9#1'])
+    expect(plain.hits[0]!.snippet).toContain(SECRET)
+    const red = searchGrouped(v5ctx, { query: '轮换令牌', redact: true })
+    expect(red.hits.map(hit => `${hit.session_id}#${hit.seq}`)).toEqual(['s9#1'])
+    expect(red.hits[0]!.snippet).not.toContain(SECRET)
+    expect(red.hits[0]!.snippet).toContain('[REDACTED:API_KEY]')
+  })
+
+  it('fields=search + redact：检索臂 search_text 同步切列（steward/memory 共用臂）', () => {
+    const rows = sessionDetail(v5ctx, 's9', { fields: 'search', redact: true }).rows as Record<string, unknown>[]
+    expect(String(rows[0]!['search_text'])).toContain('[REDACTED:API_KEY]')
+    expect(String(rows[0]!['search_text'])).not.toContain(SECRET)
+    expect(rows[0]).not.toHaveProperty('text')
   })
 })

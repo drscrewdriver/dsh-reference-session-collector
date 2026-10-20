@@ -1,12 +1,21 @@
 /**
- * 查询面（T4.1）：status / listSessions / sessionDetail / surfaceLedger /
- * recallReport / search 六函数 + 缓存层 2/3（sessions 汇总常驻 Map 由
+ * 查询面（T4.1 / v5 读侧 task_10-11）：status / listSessions / sessionDetail /
+ * surfaceLedger / recallReport / search 六函数 + 缓存层 2/3（sessions 汇总常驻 Map 由
  * schema.ts 维护；per-session 台账 LRU cap 32，键含 synced_at 代际——
- * 会话重同步即自然失效）。
+ * 会话重同步即自然失效；LRU 键不随 redact 变——redact 臂只落在无缓存的
+ * sessionDetail/search 两路径上）。
  *
- * sessionDetail 支持 `turn=` 区间过滤与 `fields=search`（返回 time/
+ * v5 读侧契约：segments 存 hash 引用（text_hash/search_text_hash/
+ * redacted_*_hash），行面经 LEFT JOIN blocks 还原为 **v4 逐字段同形**的
+ * 15 列（缺省臂=CCI/steward/locate 零感知）；surface_text 退役派生化——
+ * 经 `replaced_by→(session,seq)→hash→blocks` 两跳 JOIN 还原链头正文，
+ * JOIN 恒带 session_id（跨会话 seq 撞键防御，findings 风险①）。
+ * `redact=1` 切 redacted 列（含 snippet 锚定文本）；fts 仍索引原文。
+ *
+ * sessionDetail 支持 `turn=` 区间过滤、`fields=search`（返回 time/
  * search_text/on_surface 检索面——steward 二期切料与 memory 三期回填共用
- * 此臂）；search 查询走 segment.ts 同构切词（中文可用）。
+ * 此臂）、`tail=N` 尾窗（R4：会话尾 N 段升序，memory recentBySession 等价
+ * 供给面）；search 查询走 segment.ts 同构切词（中文可用）。
  */
 import type { ProjectionStore, SessionRow } from './schema.ts'
 import { sanitizeFtsQuery } from './segment.ts'
@@ -126,24 +135,72 @@ function parseTurnRange(raw?: string): { min: number; max: number } | undefined 
 }
 
 /**
- * segments 明细。
- * @param turn - `turn=` 区间过滤（`a-b` 闭区间或单值）。
- * @param fields - `'search'` 返检索面字段（time/search_text/on_surface）。
+ * v5 读侧列集：hash 引用列名对（缺省原文臂 / redact=1 脱敏臂）——
+ * 常数字面量拼入 SQL，无注入面（R3「redact=1 切 redacted 列」）。
+ */
+const PLAIN_FACE = { textHash: 'text_hash', searchTextHash: 'search_text_hash' } as const
+const REDACTED_FACE = { textHash: 'redacted_text_hash', searchTextHash: 'redacted_search_text_hash' } as const
+
+/** 两面对的结构类型（字面量并集在拼接参数处归宽）。 */
+type FaceColumns = { readonly textHash: string; readonly searchTextHash: string }
+
+/** v4 segments DDL 15 列的还原 SELECT（v5 逐字段同形回归地基；列序一致；
+ * 取材列对 bt/bs/hb 由 faceJoins 按 redact 臂选定，本模板不感知）。 */
+const DETAIL_COLUMNS = `s.session_id, s.seq, s.turn, s.step, s.kind, s.role, s.time,
+    COALESCE(bt.body, '') AS text, s.tokens,
+    COALESCE(bs.body, '') AS search_text,
+    s.on_surface, s.compressed,
+    CASE WHEN s.compressed = 1 THEN COALESCE(hb.body, '') ELSE NULL END AS surface_text,
+    s.surface_tokens, s.replaced_by`
+
+/** blocks/链头两跳 JOIN 子句（replaced_by 恒带 session_id，撞键防御）。 */
+function faceJoins(face: FaceColumns): string {
+  return `FROM segments s
+    LEFT JOIN blocks bt ON bt.hash = s.${face.textHash}
+    LEFT JOIN blocks bs ON bs.hash = s.${face.searchTextHash}
+    LEFT JOIN segments h ON h.session_id = s.session_id AND h.seq = s.replaced_by AND s.compressed = 1
+    LEFT JOIN blocks hb ON hb.hash = h.${face.textHash}`
+}
+
+/** sessionDetail 选项（turn 区间 / fields 检索臂 / tail 尾窗 / redact 脱敏臂）。 */
+export interface SessionDetailOptions {
+  turn?: string
+  fields?: string
+  /** R4 尾窗：正整数=会话尾 N 段（过滤后），升序返回；非法/缺省=全量。 */
+  tail?: number
+  /** R3：true=切 redacted 列（含派生 surface_text 用链头 redacted 正文）。 */
+  redact?: boolean
+}
+
+/**
+ * segments 明细（v4 逐字段同形还原）。
+ * @param opts.turn - `turn=` 区间过滤（`a-b` 闭区间或单值）。
+ * @param opts.fields - `'search'` 返检索面字段（time/search_text/on_surface）。
+ * @param opts.tail - 尾窗 N：先取 seq 降序 N 行再翻升序（与会话文件真实尾部对拍）。
+ * @param opts.redact - 脱敏臂：text/search_text/surface_text 取 redacted_* 列。
  */
 export function sessionDetail(
   ctx: QueryContext,
   sessionId: string,
-  opts: { turn?: string; fields?: string } = {},
+  opts: SessionDetailOptions = {},
 ): { session: SessionRow | undefined; rows: unknown[] } {
   const store = ctx.store
   const session = store.summaries.get(sessionId)
+  const face = opts.redact === true ? REDACTED_FACE : PLAIN_FACE
   const range = parseTurnRange(opts.turn)
+  const tail = typeof opts.tail === 'number' && Number.isFinite(opts.tail) && opts.tail > 0
+    ? Math.floor(opts.tail)
+    : undefined
   const where = range === undefined
-    ? 'SELECT * FROM segments WHERE session_id=? ORDER BY seq'
-    : 'SELECT * FROM segments WHERE session_id=? AND turn BETWEEN ? AND ? ORDER BY seq'
-  const rows = (range === undefined
-    ? store.db.prepare(where).all(sessionId)
-    : store.db.prepare(where).all(sessionId, range.min, range.max)) as unknown as Record<string, unknown>[]
+    ? 'WHERE s.session_id=?'
+    : 'WHERE s.session_id=? AND s.turn BETWEEN ? AND ?'
+  const params: (string | number)[] = range === undefined ? [sessionId] : [sessionId, range.min, range.max]
+  const order = tail === undefined ? 'ORDER BY s.seq ASC' : 'ORDER BY s.seq DESC LIMIT ?'
+  if (tail !== undefined) params.push(tail)
+  const fetched = store.db
+    .prepare(`SELECT ${DETAIL_COLUMNS} ${faceJoins(face)} ${where} ${order}`)
+    .all(...params) as unknown as Record<string, unknown>[]
+  const rows = tail === undefined ? fetched : fetched.reverse()
   if (opts.fields !== 'search') {
     return { session, rows }
   }
@@ -167,10 +224,21 @@ export function surfaceLedger(ctx: QueryContext, sessionId: string): Record<stri
   const cached = ctx.surfaceLru.get(key)
   if (cached !== undefined) return cached as Record<string, unknown>
   const onSurface = store.db.prepare(
-    'SELECT seq, turn, step, kind, role, time, tokens, text FROM segments WHERE session_id=? AND on_surface=1 ORDER BY seq',
+    `SELECT s.seq, s.turn, s.step, s.kind, s.role, s.time, s.tokens,
+        COALESCE(b.body, '') AS text
+     FROM segments s
+     LEFT JOIN blocks b ON b.hash = s.text_hash
+     WHERE s.session_id=? AND s.on_surface=1 ORDER BY s.seq`,
   ).all(sessionId)
+  // surface_text 两跳派生（v5 退役直存）：s.replaced_by→同会话链头行→其
+  // text_hash 块正文；与 v4 直存值等值对拍（chain 在投影期已收敛到终替）。
   const compressed = store.db.prepare(
-    'SELECT seq, replaced_by, surface_text, surface_tokens FROM segments WHERE session_id=? AND compressed=1 ORDER BY seq',
+    `SELECT s.seq, s.replaced_by,
+        COALESCE(hb.body, '') AS surface_text, s.surface_tokens
+     FROM segments s
+     LEFT JOIN segments h ON h.session_id = s.session_id AND h.seq = s.replaced_by
+     LEFT JOIN blocks hb ON hb.hash = h.text_hash
+     WHERE s.session_id=? AND s.compressed=1 ORDER BY s.seq`,
   ).all(sessionId)
   const value: Record<string, unknown> = {
     session_id: sessionId,
@@ -226,20 +294,26 @@ export function recallReport(ctx: QueryContext, sessionId: string): Record<strin
   return value
 }
 
-/** FTS5 BM25 内容搜索（中英同构切词，走 sanitizeFtsQuery）。 */
+/**
+ * FTS5 BM25 内容搜索（中英同构切词，走 sanitizeFtsQuery）。
+ * v5：fts 仍索引原文（R3）；snippet 经 blocks 还原，`redact` 只切 snippet
+ * 取材列（redacted_search_text_hash），命中/排序语义两臂一致。
+ */
 export function search(
   ctx: QueryContext,
   query: string,
-  opts: { session?: string; limit?: number } = {},
+  opts: { session?: string; limit?: number; redact?: boolean } = {},
 ): { query: string; match: string; hits: Record<string, unknown>[] } {
   const match = sanitizeFtsQuery(query)
   if (match === '') return { query, match, hits: [] }
   const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 20)), 100)
+  const snippetCol = (opts.redact === true ? REDACTED_FACE : PLAIN_FACE).searchTextHash
   const sessionClause = opts.session !== undefined && opts.session !== '' ? 'AND segments_fts.session_id = ?' : ''
   const sql = `SELECT segments_fts.session_id AS session_id, segments_fts.seq AS seq, segments_fts.kind AS kind,
-      bm25(segments_fts) AS rank, substr(s.search_text, 1, 200) AS snippet, s.time, s.on_surface, s.turn
+      bm25(segments_fts) AS rank, substr(COALESCE(b.body, ''), 1, 200) AS snippet, s.time, s.on_surface, s.turn
     FROM segments_fts
     JOIN segments s ON s.session_id = segments_fts.session_id AND s.seq = segments_fts.seq
+    LEFT JOIN blocks b ON b.hash = s.${snippetCol}
     WHERE segments_fts MATCH ? ${sessionClause}
     ORDER BY rank LIMIT ?`
   const stmt = ctx.store.db.prepare(sql)
@@ -303,6 +377,8 @@ export interface GroupedSearchRequest {
   /** 排序：缺省 relevance；'time'=会话 updated_at 降序、分数平手。 */
   sortBy?: 'relevance' | 'time'
   limit?: number
+  /** R3：true=snippet 取材切 redacted_search_text（命中/排序不变，fts 仍原文）。 */
+  redact?: boolean
 }
 
 /** 分组命中（wire 蛇形，会话级最强命中）。 */
@@ -320,6 +396,7 @@ export interface GroupedSearchHit {
  * 会话分组全文搜索（op=search&group=session）：BM25 候选窗 → 按会话取
  * 加权最强命中 → 排序分页。数学/视界与 steward engine.search 逐字同构：
  * score = −rank × weight(type)，时间排序键是会话 updated_at（非命中 time）。
+ * snippet 锚定文本经 blocks 还原（redact 臂切 redacted_search_text_hash）。
  */
 export function searchGrouped(ctx: QueryContext, request: GroupedSearchRequest): { query: string; hits: GroupedSearchHit[] } {
   const match = sanitizeFtsQuery(request.query)
@@ -346,11 +423,13 @@ export function searchGrouped(ctx: QueryContext, request: GroupedSearchRequest):
     dateParams.push(request.to)
   }
   const dateClause = dateClauses.join(' ')
+  const snippetCol = (request.redact === true ? REDACTED_FACE : PLAIN_FACE).searchTextHash
   const sql = `SELECT seg.session_id AS session_id, seg.seq AS seq, seg.kind AS kind, seg.time AS time,
-      seg.search_text AS search_text, bm25(segments_fts) AS rank,
+      COALESCE(b.body, '') AS search_text, bm25(segments_fts) AS rank,
       sess.title AS title, sess.last_time_ms AS updated_at
     FROM segments_fts
     JOIN segments seg ON seg.session_id = segments_fts.session_id AND seg.seq = segments_fts.seq
+    LEFT JOIN blocks b ON b.hash = seg.${snippetCol}
     JOIN sessions sess ON sess.session_id = seg.session_id
     WHERE segments_fts MATCH ?
       AND seg.kind IN (${placeholders}) ${surfaceClause} ${archivedClause} ${dateClause}

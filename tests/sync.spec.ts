@@ -64,6 +64,8 @@ interface MockStore extends SyncStorePort {
   replaces: Array<{ projection: unknown; meta: SyncReplaceMeta }>
   archivedCalls: Array<[string, number]>
   deletes: string[]
+  /** R5 mock 面:current 由测试操控(模拟字典增长/驱逐),last 由轮尾持久化。 */
+  blocks: { current: number; last: number }
 }
 
 function createMockStore(): MockStore {
@@ -71,11 +73,13 @@ function createMockStore(): MockStore {
   const replaces: Array<{ projection: unknown; meta: SyncReplaceMeta }> = []
   const archivedCalls: Array<[string, number]> = []
   const deletes: string[] = []
+  const blocks = { current: 0, last: 0 }
   return {
     byDir,
     replaces,
     archivedCalls,
     deletes,
+    blocks,
     getSessionByDir(dirId) {
       const row = byDir.get(dirId)
       return row === undefined ? undefined : { ...row }
@@ -105,6 +109,12 @@ function createMockStore(): MockStore {
       for (const [dirId, row] of byDir) {
         if (row.sessionId === sessionId) byDir.delete(dirId)
       }
+    },
+    blocksWatermark() {
+      return { current: blocks.current, last: blocks.last }
+    },
+    setBlocksWatermark(value) {
+      blocks.last = value
     },
   }
 }
@@ -446,5 +456,51 @@ describe('删除剪枝（被 session 删除的会话→WAL 级联清对应 uuid�
     expect(res.totalDiscovered).toBe(1)
     expect(res.pruned).toEqual([])
     expect(store.deletes).toEqual([])
+  })
+})
+
+describe('R5 blocks 字典水位（v5：stat 全命中但字典驱逐过→强制重投，防静默缺块）', () => {
+  it('水位倒退轮强制重投；正常轮 stat 命中仍 skip；轮尾持久化水位', async () => {
+    const dshHome = makeDshHome()
+    writeSessionFixture(dshHome, 'sess-a', HEADER_A, EVENTS_A)
+    const store = createMockStore()
+    const projection = createMockProjection()
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+
+    const first = await sync.syncAll({ dshHome })
+    expect(first.updated).toBe(1)
+    expect(store.blocks.last).toBe(0)
+
+    // 字典随投影增长(真身=ensureBlock 推 rowid;mock 由测试操控 current)
+    store.blocks.current = 9
+    const second = await sync.syncAll({ dshHome })
+    expect(second).toMatchObject({ updated: 0, skipped: 1 }) // 水位前进不算驱逐
+    expect(store.blocks.last).toBe(9) // 轮尾持久化现值
+
+    // 字典被清/换:current 倒退到低于持久化 last——stat 命中也不得 skip
+    store.blocks.current = 2
+    const third = await sync.syncAll({ dshHome })
+    expect(third.updated).toBe(1)
+    expect(third.skipped).toBe(0)
+    expect(projection.calls).toHaveLength(2)
+    expect(store.blocks.last).toBe(2)
+
+    // 水位回正常:第四轮恢复 stat 命中零解码
+    const fourth = await sync.syncAll({ dshHome })
+    expect(fourth).toMatchObject({ updated: 0, skipped: 1 })
+    expect(projection.calls).toHaveLength(2)
+  })
+
+  it('首次同步(无持久化水位 last=0)不算驱逐;current=0 空典也合法', async () => {
+    const dshHome = makeDshHome()
+    writeSessionFixture(dshHome, 'sess-a', HEADER_A, EVENTS_A)
+    const store = createMockStore()
+    const projection = createMockProjection()
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+    await sync.syncAll({ dshHome })
+    // 空典 mock:current 保持 0——不触发驱逐臂
+    const second = await sync.syncAll({ dshHome })
+    expect(second).toMatchObject({ updated: 0, skipped: 1 })
+    expect(projection.calls).toHaveLength(1)
   })
 })

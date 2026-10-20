@@ -1,6 +1,7 @@
 /**
  * T5.2 路由面断言：op→JSON 全 200；未知 op 400；webServer 缺席 apply 不抛；
- * 非 trusted host 403；POST sync 即回 accepted。
+ * 非 trusted host 403；POST sync 即回 accepted；
+ * v5 task_13：HTTP 层 redact=1 双态（非法值=0 回原文臂）与 tail=N 尾窗。
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -39,6 +40,9 @@ const events: DecodedEvent[] = [
   { type: 'step/start', seq: 0, time: 100, data: { turn: 1, step: 1 } },
   { type: 'user/message', seq: 1, time: 200, data: { content: [{ type: 'text', text: '搜索标记词' }] } },
   { type: 'assistant/message', seq: 2, time: 300, data: { message: { content: [{ type: 'text', text: 'body text here' }] } } },
+  { type: 'step/start', seq: 3, time: 400, data: { turn: 2, step: 1 } },
+  // v5 脱敏臂种子：Bearer 令牌会被 redactSecrets 切为 [REDACTED:AUTH_TOKEN]
+  { type: 'user/message', seq: 4, time: 500, data: { content: [{ type: 'text', text: '泄露面核对 Bearer abcdefghijklmnop0123456789 完结' }] } },
 ]
 
 let dir = ''
@@ -131,6 +135,42 @@ describe('GET op 分发', () => {
     expect((await get('/api/dsh-reference-session-collector?op=search')).statusCode).toBe(400)
     expect((await get('/api/dsh-reference-session-collector?op=nope')).statusCode).toBe(400)
     expect((await get('/api/dsh-reference-session-collector')).statusCode).toBe(400)
+  })
+
+  it('v5 op=session 缺省臂与 redact=1 双态；非法 redact=2 回原文（R3）', async () => {
+    const plain = (await get('/api/dsh-reference-session-collector?op=session&session=s-route')).json().rows as Record<string, unknown>[]
+    const secretRow = plain.find(row => Number(row['seq']) === 4)
+    expect(String(secretRow?.['text'])).toContain('Bearer abcdefghijklmnop0123456789')
+    const red = (await get('/api/dsh-reference-session-collector?op=session&session=s-route&redact=1')).json().rows as Record<string, unknown>[]
+    const redRow = red.find(row => Number(row['seq']) === 4)
+    expect(String(redRow?.['text'])).toContain('[REDACTED:AUTH_TOKEN]')
+    expect(String(redRow?.['text'])).not.toContain('abcdefghijklmnop0123456789')
+    expect(String(redRow?.['search_text'])).not.toContain('abcdefghijklmnop0123456789')
+    // 非法值=0：缺省原文臂
+    const bad = (await get('/api/dsh-reference-session-collector?op=session&session=s-route&redact=2')).json().rows as Record<string, unknown>[]
+    expect(String(bad.find(row => Number(row['seq']) === 4)?.['text'])).toContain('abcdefghijklmnop0123456789')
+  })
+
+  it('v5 op=session&tail=N 尾窗升序；非法 tail 忽略（R4）', async () => {
+    const tail = (await get('/api/dsh-reference-session-collector?op=session&session=s-route&tail=2')).json().rows as Record<string, unknown>[]
+    expect(tail.map(row => Number(row['seq']))).toEqual([2, 4])
+    const bad = (await get('/api/dsh-reference-session-collector?op=session&session=s-route&tail=abc')).json().rows as Record<string, unknown>[]
+    expect(bad.map(row => Number(row['seq']))).toEqual([1, 2, 4])
+  })
+
+  it('v5 op=search redact 双态（平铺臂与 group=session 臂）：命中不变、snippet 切列', async () => {
+    const q = encodeURIComponent('泄露面核对')
+    const plain = (await get(`/api/dsh-reference-session-collector?op=search&q=${q}`)).json().hits as Record<string, unknown>[]
+    expect(plain.length).toBeGreaterThan(0)
+    expect(String(plain[0]?.['snippet'])).toContain('abcdefghijklmnop0123456789')
+    const red = (await get(`/api/dsh-reference-session-collector?op=search&q=${q}&redact=1`)).json().hits as Record<string, unknown>[]
+    expect(red.map(hit => `${hit['session_id']}#${hit['seq']}`)).toEqual(plain.map(hit => `${hit['session_id']}#${hit['seq']}`))
+    expect(String(red[0]?.['snippet'])).not.toContain('abcdefghijklmnop0123456789')
+    const groupedPlain = (await get(`/api/dsh-reference-session-collector?op=search&group=session&q=${q}&archived=all`)).json().hits as Record<string, unknown>[]
+    expect(String(groupedPlain[0]?.['snippet'])).toContain('abcdefghijklmnop0123456789')
+    const groupedRed = (await get(`/api/dsh-reference-session-collector?op=search&group=session&q=${q}&archived=all&redact=1`)).json().hits as Record<string, unknown>[]
+    expect(groupedRed.map(hit => `${hit['session_id']}#${hit['seq']}`)).toEqual(groupedPlain.map(hit => `${hit['session_id']}#${hit['seq']}`))
+    expect(String(groupedRed[0]?.['snippet'])).not.toContain('abcdefghijklmnop0123456789')
   })
 
   it('recall/surface 省 session 参数 → 自解析最活跃会话（CCI 无参臂契约，装机对练实锤）', async () => {

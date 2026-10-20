@@ -49,6 +49,7 @@
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "smoke": "node scripts/smoke-lib.mjs",
+    "smoke:real": "node scripts/rebuild-smoke.mjs",
     "test": "vitest run",
     "lint": "eslint src tests eslint.config.js",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build && npm run smoke"
