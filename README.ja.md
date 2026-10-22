@@ -1,4 +1,4 @@
-# dsh-reference-session-collector (DRS) — セッション原文プロジェクション同期器
+# dsh-reference-session-collector (DRSC) — セッション原文プロジェクション同期器
 
 **DeepSeek Harness (DSH) プラグイン**: `~/.dsh/sessions/**` のセッション
 ログを**読み取り専用**で走査し、復号後に独自 SQLite プロジェクション
@@ -44,7 +44,7 @@ HTTP ルート。ゲートチェーン `pnpm check` 全緑（9スイート / 66�
 - セッションファイルと `workspace.json` は常時読み取り専用;
 - 本プラグインの全書き込みは `~/.dsh-reference-session-collector/projection.db` にのみ;
 - セッション単位の全量書換式置換（トランザクション内 DELETE+INSERT）、冪等;
-- **マスキング責任は DRS にない**: 原文を保存、露出面=セッションファイル自体。
+- **マスキング責任は DRSC にない**: 原文を保存、露出面=セッションファイル自体。
 
 ## 環境変数
 

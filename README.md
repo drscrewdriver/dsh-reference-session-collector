@@ -1,12 +1,12 @@
-# dsh-reference-session-collector (DRS) — 会话原文投影同步器
+# dsh-reference-session-collector (DRSC) — 会话原文投影同步器
 
 > 只读扫描 `~/.dsh/sessions/**` 会话日志，解码后投影进插件自有 SQLite
 > （segments / replaces / FTS5），经单条 fenced HTTP 路由对外提供
 > surface 标记、召回对账与中文可用的内容检索面。**绝不写会话文件。**
 
-# Session Reference Projector (DRS) — English summary
+# Session Reference Projector (DRSC) — English summary
 
-DRS is a read-only projector over the host's session logs. It walks
+DRSC is a read-only projector over the host's session logs. It walks
 `~/.dsh/sessions/**`, decodes zstd/teiled-frame logs with a vendored leaf
 decoder, and rewrites per-session projections into
 `~/.dsh-reference-session-collector/projection.db` (SQLite via `node:sqlite`, four
@@ -15,12 +15,12 @@ tables + one FTS5 virtual table). A single fenced HTTP route
 per-session segment windows, the surface ledger, recall/compress pair
 accounting and full-text search. Token counts share the exact same
 DeepSeek-V4 tokenizer and formula as CCI's `verify`, falling back to a
-labelled `chars/4` basis when assets are absent. DRS never writes to any
+labelled `chars/4` basis when assets are absent. DRSC never writes to any
 session file; its only writes land in its own data directory.
 
 ## 定位 / Positioning
 
-| 消费方 | 用 DRS 做什么 | 分期 |
+| 消费方 | 用 DRSC 做什么 | 分期 |
 |---|---|---|
 | CCI（context-compression） | surface 标记（compressed/surface_text/replaced_by）、召回对账（Σb 回吐、Σ(a−b) 毛节省）、verify 免全量解码 | 一期 |
 | steward（会话管家） | 内容搜索语料源切换（search_text/time/on_surface 检索面） | 二期 |
@@ -68,7 +68,7 @@ session file; its only writes land in its own data directory.
 - 会话文件（`~/.dsh/sessions/**`）与 `workspace.json` 一律只读；
 - 插件的全部写入落在 `~/.dsh-reference-session-collector/projection.db`；
 - 每 session 全量重写式替换（事务内 DELETE+INSERT），幂等可重放；
-- **脱敏责任不在 DRS**：projection.db 存原文，泄露面=会话文件本身。
+- **脱敏责任不在 DRSC**：projection.db 存原文，泄露面=会话文件本身。
 
 ## 分期路线
 

@@ -1,4 +1,4 @@
-# dsh-reference-session-collector (DRS) — 세션 원문 투영 동기화기
+# dsh-reference-session-collector (DRSC) — 세션 원문 투영 동기화기
 
 **DeepSeek Harness(DSH) 플러그인**: `~/.dsh/sessions/**` 세션 로그를
 **읽기 전용**으로 스캔하여 디코딩 후 자체 SQLite 투영
@@ -44,7 +44,7 @@
 - 세션 파일과 `workspace.json`은 상시 읽기 전용;
 - 모든 기록은 `~/.dsh-reference-session-collector/projection.db`에만;
 - 세션 단위 전체 재작성 치환(트랜잭션 내 DELETE+INSERT), 멱등;
-- **마스킹 책임은 DRS에 없음**: 원문 저장, 노출면=세션 파일 자체.
+- **마스킹 책임은 DRSC에 없음**: 원문 저장, 노출면=세션 파일 자체.
 
 ## 환경 변수
 

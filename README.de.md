@@ -1,4 +1,4 @@
-# dsh-reference-session-collector (DRS) — Sitzungs-Projektionssynchronisierer
+# dsh-reference-session-collector (DRSC) — Sitzungs-Projektionssynchronisierer
 
 **DeepSeek-Harness(DSH)-Plugin**: Liest die Sitzungsprotokolle unter
 `~/.dsh/sessions/**` **nur lesend**, dekodiert sie und projiziert sie in eine
@@ -50,7 +50,7 @@ Memory-Anker-Rückfüllung) und Effizienz-Benchmark T9.1.
   `~/.dsh-reference-session-collector/projection.db`;
 - pro Sitzung vollständiger Neu-Schreib-Ersatz (DELETE+INSERT in einer
   Transaktion), idempotent;
-- **Maskierung liegt nicht bei DRS**: Rohtext-Speicherung,
+- **Maskierung liegt nicht bei DRSC**: Rohtext-Speicherung,
   Expositionsfläche = die Sitzungsdateien selbst.
 
 ## Umgebungsvariablen

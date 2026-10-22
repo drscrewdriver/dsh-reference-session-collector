@@ -1,4 +1,4 @@
-# dsh-reference-session-collector (DRS)
+# dsh-reference-session-collector (DRSC)
 
 **Session reference projection synchronizer** — a DeepSeek Harness (DSH) plugin.
 
@@ -9,8 +9,8 @@ replacement markers, recall pointers, and an FTS5 full-text index — so context
 compression (cci), the session steward, and prime-memory all read the same
 projection instead of each decoding logs on their own.
 
-> Naming: `dsh-reference-session-collector` abbreviates to **DRS**, which is also the
-> first three letters of drscrewdriver.
+> Naming: `dsh-reference-session-collector` abbreviates to **DRSC** — the initials of
+> dsh-**R**eference-**S**ession-**C**ollector.
 
 ## Status
 
@@ -69,7 +69,7 @@ missing (fail-soft).
 and it has no write counterpart — ever. The plugin writes only to
 `~/.dsh-reference-session-collector/projection.db`. That database holds **unsanitized
 original text**; its exposure equals the session files themselves. Any
-"sanitized corpus" requirement belongs to consumers, not DRS.
+"sanitized corpus" requirement belongs to consumers, not DRSC.
 
 ## Configuration (v0)
 
@@ -83,16 +83,16 @@ No settings face yet (lands with phase-2 wiring). Environment variables:
 
 ## Roadmap
 
-1. **Phase 1 · cci reconciliation**: monitor/verify gains a DRS recall column —
+1. **Phase 1 · cci reconciliation**: monitor/verify gains a DRSC recall column —
    claims vs formula vs projection, three-column accounting (read-only HTTP).
 2. **Phase 2 · steward corpus switch**: the steward's inlined search engine
-   reads DRS (segments.time/on_surface/search_text + last_time_ms/archived
+   reads DRSC (segments.time/on_surface/search_text + last_time_ms/archived
    cover its whole hit face; field mapping in
    `.agents/plans/drs-start/findings.md`).
 3. **Phase 3 · memory history projection (read-only)**: the l0 write path does
    **not** move (sanitization/redaction/record_id ownership stays in memory's
    capture side; it is semantically incompatible with full-session rewrite).
-   DRS only serves historical anchor backfill and corpus. Vector layer
+   DRSC only serves historical anchor backfill and corpus. Vector layer
    (BGE-M3 int8) is a separate optional batch job.
 
 ## Development

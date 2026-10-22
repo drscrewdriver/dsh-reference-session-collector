@@ -1,4 +1,4 @@
-# dsh-reference-session-collector (DRS) — Synchroniseur de projection de sessions
+# dsh-reference-session-collector (DRSC) — Synchroniseur de projection de sessions
 
 **Plugin DeepSeek Harness (DSH)** : balaie les journaux de session sous
 `~/.dsh/sessions/**` en **lecture seule**, les décode et les projette dans
@@ -49,7 +49,7 @@ d'efficacité T9.1.
   `~/.dsh-reference-session-collector/projection.db` ;
 - remplacement réécriture-complète par session (DELETE+INSERT dans une
   transaction), idempotent ;
-- **l'anonymisation n'est pas la responsabilité de DRS** : texte brut
+- **l'anonymisation n'est pas la responsabilité de DRSC** : texte brut
   stocké, surface d'exposition = les fichiers de session eux-mêmes.
 
 ## Variables d'environnement

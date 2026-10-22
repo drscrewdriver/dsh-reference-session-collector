@@ -1,4 +1,4 @@
-# dsh-reference-session-collector (DRS) — sincronizador de proyección de sesiones
+# dsh-reference-session-collector (DRSC) — sincronizador de proyección de sesiones
 
 **Complemento de DeepSeek Harness (DSH)**: escanea **solo en lectura** los
 registros de sesión en `~/.dsh/sessions/**`, los decodifica y los proyecta
@@ -49,7 +49,7 @@ fase 3 relleno de anclas de memory) y banco de pruebas de eficiencia T9.1.
   `~/.dsh-reference-session-collector/projection.db`;
 - reemplazo de reescritura completa por sesión (DELETE+INSERT en una
   transacción), idempotente;
-- **la desensibilización no es responsabilidad de DRS**: almacena texto
+- **la desensibilización no es responsabilidad de DRSC**: almacena texto
   original; la superficie de exposición son los propios archivos de sesión.
 
 ## Variables de entorno
