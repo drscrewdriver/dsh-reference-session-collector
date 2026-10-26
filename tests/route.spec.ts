@@ -75,6 +75,8 @@ describe('GET op 分发', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().ok).toBe(true)
     expect(res.json().sessions).toBe(1)
+    // 消费方（search-index 深度同步）靠 syncing 判慢扫何时落定。
+    expect(res.json().syncing).toBe(false)
   })
 
   it('sessions → 200 分页', async () => {

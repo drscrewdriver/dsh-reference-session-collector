@@ -195,12 +195,18 @@ function parseTail(url: URL): number | undefined {
 }
 
 /**
- * op 分发：GET `?op=…`；POST `{op:'sync'}` 触发后台同步。
+ * op 分发：GET `?op=…`；POST `?op=sync` 触发后台同步。
+ * POST 的 op 只从 **query** 读（`{op:'sync'}` 落进 body 会 400 unknown POST op）。
  * 未知 op / 缺参 → 400（不留空壳）。
  */
 export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!isTrustedRequest(req, deps.trustedHosts)) {
     writeJson(res, 403, { ok: false, error: 'forbidden' })
+    return
+  }
+  // 延迟初始化未完成——投影面不可用（503）。
+  if (deps.query === undefined) {
+    writeJson(res, 503, { ok: false, error: 'initializing' })
     return
   }
   let url: URL
@@ -227,7 +233,9 @@ export async function handleDrsRequest(deps: DrsHandlerDeps, req: IncomingMessag
 
   switch (op) {
     case 'status': {
-      writeJson(res, 200, { ok: true, ...status(deps.query, deps.sync.lastSyncResult ?? null) })
+      // syncing：真实在跑旗标（单次触发即回、后台跑完才落 last_sync），
+      // 消费方（dsh-search-index 深度同步）靠它判断慢扫何时落定。
+      writeJson(res, 200, { ok: true, ...status(deps.query, deps.sync.lastSyncResult ?? null), syncing: deps.sync.isSyncing })
       return
     }
     case 'sessions': {
@@ -345,7 +353,8 @@ function safeReadService(ctx: Context, name: string): unknown {
 }
 
 /**
- * 插件主体：开库 → 装配 sync（启动延迟首轮 + interval 轮）→ 双通道注册路由。
+ * 插件主体：apply() 立即返回，重活（开库/建 sync/注册路由）推迟到 setImmediate。
+ * 宿主插件装载串行同步——apply 不返回则整列插件都装不上，前端一直 Loading plugins…。
  * @param ctx - host 插件上下文（webServer 声明注入；webStartup/webRuntime 回退臂）。
  */
 export function apply(ctx: Context): void {
@@ -358,53 +367,13 @@ export function apply(ctx: Context): void {
     } catch { /* 日志面永不致命 */ }
   }
 
-  const storeDir = resolveIndexDir()
-  let store: ProjectionStore
-  let query: QueryContext
-  try {
-    store = openProjectionStore(storeDir)
-    query = createQueryContext(store)
-  } catch (error) {
-    log('warn', 'projection store 不可用（node:sqlite 缺席/目录不可写）：插件停用—— %s',
-      String((error as Error)?.message ?? error))
-    return
-  }
-
-  const sync = new ProjectionSync({
-    store: createStorePort(store),
-    project: (events, options) => projectSessionEvents(events, {
-      dirId: options.dirId,
-      ...(options.header === undefined ? {} : { header: options.header }),
-      // 端口计数器返 TokenCount；投影只需数值臂（CCI verify 同款降级）。
-      ...(options.exactCounter === undefined ? {} : {
-        exactCounter: (text: string): number => {
-          const count = options.exactCounter?.(text)
-          return count !== undefined && count.kind === 'exact-tokenizer'
-            ? count.tokens
-            : Math.ceil(text.length / 4)
-        },
-      }),
-    }),
-    log: (level, message, ...args) => log(level, message, ...args),
-  })
-
-  // 生命周期：dispose 清定时器 + 关库。
+  // 延迟初始化状态（setImmediate 臂赋值；请求面兜底 503）。
+  let store: ProjectionStore | undefined
+  let query: QueryContext | undefined
+  let sync: ProjectionSync | undefined
   let bootTimer: ReturnType<typeof setTimeout> | undefined
   let disposeInterval: () => void = () => {}
-  ctx.effect(() => {
-    bootTimer = setTimeout(() => {
-      void sync.syncAll().then(result => {
-        log('info', 'boot sync done: updated=%d skipped=%d basis=%s %dms',
-          result.updated, result.skipped, result.basis, result.durationMs)
-      }).catch((error: unknown) => log('warn', 'boot sync failed: %s', String((error as Error)?.message ?? error)))
-    }, BOOT_SYNC_DELAY_MS)
-    disposeInterval = startIntervalSync(sync)
-    return () => {
-      if (bootTimer !== undefined) clearTimeout(bootTimer)
-      disposeInterval()
-      store.close()
-    }
-  }, 'dsh-reference-session-collector: projection lifecycle')
+  let registered = false
 
   // trustedHosts best-effort（双名回退链，属性/get 两层 safe；缺席=放行）。
   const readStartupFace = (): WebStartupLike | undefined => {
@@ -415,13 +384,12 @@ export function apply(ctx: Context): void {
   const depsFor = (): DrsHandlerDeps => {
     const startup = readStartupFace()
     return {
-      query,
-      sync,
+      query: query!,
+      sync: sync!,
       ...(startup?.trustedHosts !== undefined ? { trustedHosts: startup.trustedHosts } : {}),
     }
   }
 
-  let registered = false
   const register = (webServer: WebServerLike, channel: 'direct' | 'inject'): void => {
     if (registered) return
     try {
@@ -445,24 +413,72 @@ export function apply(ctx: Context): void {
     }
   }
 
-  const readService = (name: string): unknown => safeReadService(ctx, name)
+  // 生命周期：dispose 清定时器 + 关库（同步登记，cleanup 在 dispose 时执行）。
+  ctx.effect(() => {
+    return () => {
+      if (bootTimer !== undefined) clearTimeout(bootTimer)
+      disposeInterval()
+      store?.close()
+    }
+  }, 'dsh-reference-session-collector: projection lifecycle')
 
-  const active = asWebServer(readService('webServer'))
-  if (active !== undefined) {
-    register(active, 'direct')
-    if (registered) return
-  }
+  // 延迟初始化：开库/建 sync/注册路由全部推迟，保证 apply 立即返回。
+  setImmediate(() => {
+    try {
+      const storeDir = resolveIndexDir()
+      store = openProjectionStore(storeDir)
+      query = createQueryContext(store)
 
-  try {
-    ctx.inject(['webServer'], (injected) => {
-      const webServer = asWebServer((injected as { webServer?: unknown }).webServer)
-      if (webServer === undefined) {
-        log('warn', 'webServer exposes no register() — drs api route not registered (projection sync keeps running)')
-        return
+      sync = new ProjectionSync({
+        store: createStorePort(store),
+        project: (events, options) => projectSessionEvents(events, {
+          dirId: options.dirId,
+          ...(options.header === undefined ? {} : { header: options.header }),
+          ...(options.exactCounter === undefined ? {} : {
+            exactCounter: (text: string): number => {
+              const count = options.exactCounter?.(text)
+              return count !== undefined && count.kind === 'exact-tokenizer'
+                ? count.tokens
+                : Math.ceil(text.length / 4)
+            },
+          }),
+        }),
+        log: (level, message, ...args) => log(level, message, ...args),
+      })
+
+      // 启动延迟首轮 sync + interval 轮。
+      bootTimer = setTimeout(() => {
+        void sync!.syncAll().then(result => {
+          log('info', 'boot sync done: updated=%d skipped=%d basis=%s %dms',
+            result.updated, result.skipped, result.basis, result.durationMs)
+        }).catch((error: unknown) => log('warn', 'boot sync failed: %s', String((error as Error)?.message ?? error)))
+      }, BOOT_SYNC_DELAY_MS)
+      disposeInterval = startIntervalSync(sync)
+
+      // 双通道注册路由。
+      const readService = (name: string): unknown => safeReadService(ctx, name)
+      const active = asWebServer(readService('webServer'))
+      if (active !== undefined) {
+        register(active, 'direct')
+        if (registered) return
       }
-      register(webServer, 'inject')
-    })
-  } catch (error) {
-    log('warn', 'webServer inject arm unavailable: %s — HTTP 面缺席，同步本体照常', String((error as Error)?.message ?? error))
-  }
+      try {
+        ctx.inject(['webServer'], (injected) => {
+          const webServer = asWebServer((injected as { webServer?: unknown }).webServer)
+          if (webServer === undefined) {
+            log('warn', 'webServer exposes no register() — drs api route not registered (projection sync keeps running)')
+            return
+          }
+          register(webServer, 'inject')
+        })
+      } catch (error) {
+        log('warn', 'webServer inject arm unavailable: %s — HTTP 面缺席，同步本体照常', String((error as Error)?.message ?? error))
+      }
+
+      log('info', 'deferred init done (store opened, sync started, routes registered)')
+    } catch (error) {
+      log('warn', 'deferred init failed — projection store 不可用（node:sqlite 缺席/目录不可写）：插件停用—— %s',
+        String((error as Error)?.message ?? error))
+    }
+  })
 }

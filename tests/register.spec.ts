@@ -1,12 +1,17 @@
 /**
  * T5.1 注册通道断言：direct(ctx.get)/inject 迟到臂双通道、duplicate 容错、
  * webServer 无 register 面 fail-soft、dispose 注销路由。
+ *
+ * v0.2.2: apply() 把重活推迟到 setImmediate，测试需 flush 一帧再断言。
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { apply, DRS_API_PATH } from '../src/index.ts'
+
+/** 等 setImmediate 一帧，让 apply() 延迟初始化跑完。 */
+const flushDeferred = () => new Promise<void>(resolve => setImmediate(resolve))
 
 const disposers: Array<() => void> = []
 const dirs: string[] = []
@@ -47,36 +52,40 @@ afterAll(() => {
 })
 
 describe('双通道路由注册', () => {
-  it('direct 臂：webServer 已在 ctx 面 → register(exact, DRS_API_PATH)', () => {
+  it('direct 臂：webServer 已在 ctx 面 → register(exact, DRS_API_PATH)', async () => {
     const off = vi.fn()
     const register = vi.fn((_route: RegisteredRoute) => off)
     const { ctx } = freshCtx({ register })
     apply(ctx)
+    await flushDeferred()
     expect(register).toHaveBeenCalledTimes(1)
     const route = register.mock.calls[0]?.[0]
     expect(route?.kind).toBe('exact')
     expect(route?.path).toBe(DRS_API_PATH)
   })
 
-  it('dispose 链：route disposer 被调用（ctx.effect 注销臂）', () => {
+  it('dispose 链：route disposer 被调用（ctx.effect 注销臂）', async () => {
     const off = vi.fn()
     const { ctx } = freshCtx({ register: (_route: RegisteredRoute) => off })
     apply(ctx)
+    await flushDeferred()
     while (disposers.length > 0) disposers.pop()?.()
     expect(off).toHaveBeenCalledTimes(1)
   })
 
-  it('duplicate exact route 容错=成功，且不再挂 inject 臂（对侧已拥有路径）', () => {
+  it('duplicate exact route 容错=成功，且不再挂 inject 臂（对侧已拥有路径）', async () => {
     const register = vi.fn((_route: RegisteredRoute): never => { throw new Error('duplicate exact route /api/dsh-reference-session-collector') })
     const { ctx, injectArms } = freshCtx({ register })
     expect(() => apply(ctx)).not.toThrow()
+    await flushDeferred()
     expect(register).toHaveBeenCalledTimes(1)
     expect(injectArms).toHaveLength(0)
   })
 
-  it('inject 迟到臂：direct 面无 webServer → inject 回调触发注册', () => {
+  it('inject 迟到臂：direct 面无 webServer → inject 回调触发注册', async () => {
     const { ctx, injectArms } = freshCtx(undefined)
     apply(ctx)
+    await flushDeferred()
     expect(injectArms).toHaveLength(1)
     const lateRegister = vi.fn((_route: RegisteredRoute) => vi.fn())
     injectArms[0]?.({ webServer: { register: lateRegister } })
@@ -84,9 +93,10 @@ describe('双通道路由注册', () => {
     expect(lateRegister.mock.calls[0]?.[0]?.path).toBe(DRS_API_PATH)
   })
 
-  it('webServer 无 register()：两臂都 fail-soft 不抛（HTTP 面缺席、同步本体照常）', () => {
+  it('webServer 无 register()：两臂都 fail-soft 不抛（HTTP 面缺席、同步本体照常）', async () => {
     const { ctx, injectArms } = freshCtx({})
     expect(() => apply(ctx)).not.toThrow()
+    await flushDeferred()
     expect(injectArms).toHaveLength(1)
     expect(() => injectArms[0]?.({ webServer: {} })).not.toThrow()
   })
@@ -123,6 +133,7 @@ describe('双通道路由注册', () => {
       },
     })
     apply(hostile as unknown as Parameters<typeof apply>[0])
+    await flushDeferred()
     expect(register).toHaveBeenCalledTimes(1)
     expect(handler).toBeDefined()
     const res = { statusCode: 0, body: '', writeHead(code: number) { res.statusCode = code }, end(data: string) { res.body = data } }
