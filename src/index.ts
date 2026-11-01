@@ -11,6 +11,12 @@
  * - 启动延迟 2.5s 首轮 syncAll + interval 轮（缺省 30s，env 可关）；
  *   dispose 关库清定时器。
  *
+ * - 跨插件读面：`drsReadFacade()` 返回绑本插件**活 QueryContext** 的只读门面（供
+ *   消费方进程内调用，绕开宿主对插件服务端请求的 HTTP 鉴权）。消费方只需认这一个
+ *   稳定符号，不必知道 QueryContext/store 的存在，也不必自己开库（自开库会多占一份
+ *   常驻 summaries 与一个读事务，且要自己拿五个内部导出名）。库未就绪/已 dispose
+ *   时返回 undefined，由消费方降级。
+ *
  * 只读纪律：本文件不直接触碰会话文件——全部经 ProjectionSync 端口。
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -25,8 +31,9 @@ import {
   status,
   surfaceLedger,
   type QueryContext,
+  type SessionDetailOptions,
 } from './surface.ts'
-import { openProjectionStore, type ProjectionStore } from './schema.ts'
+import { openProjectionStore, type ProjectionStore, type SessionRow } from './schema.ts'
 import { projectSessionEvents } from './projection.ts'
 import type { SessionProjection } from './projection.ts'
 
@@ -353,6 +360,44 @@ function safeReadService(ctx: Context, name: string): unknown {
 }
 
 /**
+ * 跨插件只读门面的返回形状：与 HTTP 面 `handleDrsRequest` 同字段
+ * （消费方已按那套映射写）。
+ */
+export interface DrsReadFacade {
+  /** 会话汇总分页（按 last_time_ms 降序）。 */
+  listSessions: (offset?: number, limit?: number) => { total: number; rows: SessionRow[] }
+  /** 单会话明细；opts.tail 缺省即全量（消费方的重建事实源臂依赖这点）。 */
+  sessionDetail: (sessionId: string, opts?: SessionDetailOptions) => { session: SessionRow | undefined; rows: unknown[] }
+  /** 全文检索（脱敏臂由 opts.redact 控制）。 */
+  search: (query: string, opts?: { session?: string; limit?: number; redact?: boolean }) => { query: string; match: string; hits: Record<string, unknown>[] }
+}
+
+/**
+ * 活 QueryContext（在 apply 的 setImmediate 臂赋值，dispose 时清空）。
+ *
+ * 为何要模块级一份：消费方从自己包作用域 `import` 本包时，在 **hoisted 布局**
+ * （desktop profile 就是 `nodeLinker: hoisted`）下解析到同一物理 lib/index.js，
+ * Node 的 ESM 缓存会返回**同一个模块实例**，因此读到的是这里已赋值的活库。
+ * 若某个部署是 pnpm 隔离布局且两包各有链接副本，两侧会是不同实例、本变量在消费侧
+ * 为 undefined——门面会诚实返回 undefined，消费方回退自开库，不会读到错数据。
+ */
+let liveQuery: QueryContext | undefined
+
+/**
+ * 取跨插件只读门面。库尚未就绪（apply 延迟初始化未完成）或已 dispose 时返回
+ * **undefined**，不抛——让消费方自己决定降级口径（报不可用或回退 HTTP）。
+ */
+export function drsReadFacade(): DrsReadFacade | undefined {
+  const ctx = liveQuery
+  if (ctx === undefined) return undefined
+  return {
+    listSessions: (offset, limit) => listSessions(ctx, offset, limit),
+    sessionDetail: (sessionId, opts) => sessionDetail(ctx, sessionId, opts),
+    search: (query, opts) => search(ctx, query, opts),
+  }
+}
+
+/**
  * 插件主体：apply() 立即返回，重活（开库/建 sync/注册路由）推迟到 setImmediate。
  * 宿主插件装载串行同步——apply 不返回则整列插件都装不上，前端一直 Loading plugins…。
  * @param ctx - host 插件上下文（webServer 声明注入；webStartup/webRuntime 回退臂）。
@@ -419,6 +464,9 @@ export function apply(ctx: Context): void {
       if (bootTimer !== undefined) clearTimeout(bootTimer)
       disposeInterval()
       store?.close()
+      // 库已关 → 门面必须同步失效，否则消费方拿到的是指向已关 db 的 QueryContext。
+      liveQuery = undefined
+      query = undefined
     }
   }, 'dsh-reference-session-collector: projection lifecycle')
 
@@ -428,6 +476,8 @@ export function apply(ctx: Context): void {
       const storeDir = resolveIndexDir()
       store = openProjectionStore(storeDir)
       query = createQueryContext(store)
+      // 对跨插件消费方暴露活查询面（见 drsReadFacade 注）。
+      liveQuery = query
 
       sync = new ProjectionSync({
         store: createStorePort(store),
