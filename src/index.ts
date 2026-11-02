@@ -51,6 +51,7 @@ export { createQueryContext, status, listSessions, sessionDetail, surfaceLedger,
 export { ProjectionSync, discoverSessionLogs, resolveDshHome, resolveIndexDir,
   resolveExactCounter, readArchivedSessionIds, startIntervalSync, resolveSyncIntervalMs,
   DEFAULT_SYNC_INTERVAL_MS, SYNC_INTERVAL_ENV, DISCOVERY_LIMIT,
+  resolveSyncBudgetMs, DEFAULT_SYNC_BUDGET_MS, SYNC_BUDGET_ENV,
   type SyncResult, type SyncStorePort, type ProjectionPort } from './sync.ts'
 export { decodeSessionLogBytes, decodeSessionLogFile, classifySessionHeader,
   readSessionGenerations, generationLogFilename,
@@ -498,7 +499,18 @@ export function apply(ctx: Context): void {
 
       // 启动延迟首轮 sync + interval 轮。
       bootTimer = setTimeout(() => {
+        /**
+         * 首轮**同样受预算约束**。实测（smoke 真库 90 会话）首轮全量建库约 70s，
+         * 远超 interval 30s：一次跑满既占主线程，又必然轮轮相撞（撞旗标直接 busy）。
+         * 会话多时"一轮建不完"是正常形状，靠 resumeCursor 在后续 interval 轮里收敛；
+         * 关键是日志不得把"部分完成"说成 done。
+         */
         void sync!.syncAll().then(result => {
+          if (result.budgetExhausted) {
+            log('info', 'boot sync partial: updated=%d skipped=%d deferred=%d basis=%s %dms (续扫留给 interval 轮)',
+              result.updated, result.skipped, result.deferred, result.basis, result.durationMs)
+            return
+          }
           log('info', 'boot sync done: updated=%d skipped=%d basis=%s %dms',
             result.updated, result.skipped, result.basis, result.durationMs)
         }).catch((error: unknown) => log('warn', 'boot sync failed: %s', String((error as Error)?.message ?? error)))

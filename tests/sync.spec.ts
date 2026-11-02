@@ -9,13 +9,16 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { generationLogFilename, type DecodedEvent } from '../src/session-file-decode.ts'
 import {
+  DEFAULT_SYNC_BUDGET_MS,
   DEFAULT_SYNC_INTERVAL_MS,
   ProjectionSync,
+  SYNC_BUDGET_ENV,
   SYNC_INTERVAL_ENV,
   discoverSessionLogs,
   readArchivedSessionIds,
   resolveDshHome,
   resolveIndexDir,
+  resolveSyncBudgetMs,
   resolveSyncIntervalMs,
   startIntervalSync,
   type SyncReplaceMeta,
@@ -139,6 +142,25 @@ function createMockProjection() {
 
 function summaryOf(replace: { projection: unknown }): { sessionId: string; dirId: string; lastTimeMs: number } {
   return (replace.projection as { summary: { sessionId: string; dirId: string; lastTimeMs: number } }).summary
+}
+
+/**
+ * 故意耗时的投影替身。
+ *
+ * 存在的理由：真解码一个 3 事件的 fixture 快到测不出「单会话耗时 > 预算」这个形状，
+ * 而 `syncOne` 里的 readFileSync/decode/project/replaceSession 全是**不可中断的同步段** ——
+ * 预算的边界只能在会话之间才能观测。忙等就是为了把那个同步段拉长。
+ */
+function createSlowProjection(ms = 2) {
+  const calls: string[] = []
+  const project = (events: readonly DecodedEvent[], options: { dirId: string; header?: Record<string, unknown> }) => {
+    const until = Date.now() + ms
+    // 忙等：这里要的正是「外部预算打不断」的同步段
+    while (Date.now() < until) { /* spin */ }
+    calls.push(options.dirId)
+    return { summary: { sessionId: options.dirId, dirId: options.dirId, lastTimeMs: events.length }, segments: [], replaces: [] }
+  }
+  return { project, calls }
 }
 
 // ─────────────────────────── 发现与路径解析 ───────────────────────────
@@ -502,5 +524,90 @@ describe('R5 blocks 字典水位（v5：stat 全命中但字典驱逐过→强�
     const second = await sync.syncAll({ dshHome })
     expect(second).toMatchObject({ updated: 0, skipped: 1 })
     expect(projection.calls).toHaveLength(1)
+  })
+})
+
+// ─────────────────────────── 单轮时间预算 ───────────────────────────
+
+describe('单轮时间预算（不完整轮禁剪枝 + 游标防饥饿）', () => {
+  const IDS = ['s1', 's2', 's3', 's4', 's5', 's6']
+
+  function seed(dshHome: string): void {
+    for (const id of IDS) writeSessionFixture(dshHome, id, HEADER_A, EVENTS_A)
+  }
+
+  it('resolveSyncBudgetMs：缺省 20s、0=不限、负数/非法回落', () => {
+    expect(resolveSyncBudgetMs({})).toBe(DEFAULT_SYNC_BUDGET_MS)
+    expect(resolveSyncBudgetMs({ [SYNC_BUDGET_ENV]: '0' })).toBe(0)
+    expect(resolveSyncBudgetMs({ [SYNC_BUDGET_ENV]: '1500' })).toBe(1500)
+    expect(resolveSyncBudgetMs({ [SYNC_BUDGET_ENV]: '-5' })).toBe(DEFAULT_SYNC_BUDGET_MS)
+    expect(resolveSyncBudgetMs({ [SYNC_BUDGET_ENV]: 'abc' })).toBe(DEFAULT_SYNC_BUDGET_MS)
+    expect(resolveSyncBudgetMs({ [SYNC_BUDGET_ENV]: '  ' })).toBe(DEFAULT_SYNC_BUDGET_MS)
+  })
+
+  it('预算耗尽：deferred 如实、已处理会话水位照写、且**不剪枝**', async () => {
+    const dshHome = makeDshHome()
+    seed(dshHome)
+    const store = createMockStore()
+    // 预置一个"目录已消失但库里有投影"的会话：完整轮会被剪枝，不完整轮不行。
+    store.byDir.set('ghost', { sessionId: 'ghost', artifactBytes: 1, artifactMtimeMs: 1, archived: 0 })
+    const projection = createSlowProjection(2)
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+
+    const res = await sync.syncAll({ dshHome, budgetMs: 1 })
+    expect(res.budgetExhausted).toBe(true)
+    expect(res.deferred).toBeGreaterThan(0)
+    // 总量守恒：处理过的 + 没处理的 = 发现总数
+    expect(res.updated + res.skipped + res.failures.length + res.softSkips.length).toBe(res.totalDiscovered - res.deferred)
+    // 已处理会话的水位已注册（byDir 有行）⇒ 下轮能 stat-skip 而不是重解
+    expect(store.byDir.size).toBeGreaterThan(1)
+    // 最关键：没扫到 ≠ 已删除。ghost 本轮不在 discovered 里，但也不得被剪枝
+    expect(store.deletes).toEqual([])
+  })
+
+  it('游标续扫：连续小预算轮各处理不同的会话（不轮转则三轮反复处理同一个，即活锁）', async () => {
+    const dshHome = makeDshHome()
+    seed(dshHome)
+    const store = createMockStore()
+    const projection = createSlowProjection(2)
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+
+    const perRound: string[][] = []
+    const deferreds: number[] = []
+    for (let round = 0; round < 3; round += 1) {
+      const before = projection.calls.length
+      const res = await sync.syncAll({ dshHome, budgetMs: 1 })
+      deferreds.push(res.deferred)
+      perRound.push(projection.calls.slice(before))
+    }
+    // 每轮只推进一步……
+    expect(perRound.map(batch => batch.length)).toEqual([1, 1, 1])
+    // ……而且三步落在不同会话上（游标生效；不轮转则三轮反复处理第一个）
+    expect(new Set(projection.calls).size).toBe(3)
+    // deferred = 本轮未处理数（不是剩余总量）：每一小预算轮都恒为 total-1
+    expect(deferreds).toEqual([IDS.length - 1, IDS.length - 1, IDS.length - 1])
+  })
+
+  it('后续轮给足预算时补全剩余会话，并恢复剪枝能力', async () => {
+    const dshHome = makeDshHome()
+    seed(dshHome)
+    const store = createMockStore()
+    store.byDir.set('ghost', { sessionId: 'ghost', artifactBytes: 1, artifactMtimeMs: 1, archived: 0 })
+    const projection = createSlowProjection(2)
+    const sync = new ProjectionSync({ store, project: projection.project, counter: 'off' })
+
+    const partial = await sync.syncAll({ dshHome, budgetMs: 1 })
+    expect(partial.budgetExhausted).toBe(true)
+
+    // budgetMs: 0 = 不限（首轮建全库用的那档）
+    const full = await sync.syncAll({ dshHome, budgetMs: 0 })
+    expect(full.budgetExhausted).toBe(false)
+    expect(full.deferred).toBe(0)
+    expect(full.totalDiscovered).toBe(IDS.length)
+    // 剩下 5 个重投，已处理那 1 个 stat-skip
+    expect(full.updated).toBe(IDS.length - 1)
+    expect(full.skipped).toBe(1)
+    // 完整轮恢复剪枝：ghost 被清
+    expect(store.deletes).toEqual(['ghost'])
   })
 })

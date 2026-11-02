@@ -88,9 +88,22 @@ verify 同公式同词表；资产缺席降级 `chars/4` 并在 `sessions.basis`
 dsh plugin --profile web add dsh-reference-session-collector
 ```
 
-要求 node ≥ 22（`zlib.zstdDecompressSync` + `node:sqlite`）。
+要求 node ≥ 22（`zlib.zstdDecompressSync` + `node:sqlite`；按内置模块实际门槛，建议 ≥22.16）。
 环境变量：`DSH_REFERENCE_SESSION_COLLECTOR_DIR` 覆盖库目录；
-`DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` 调同步周期（0=关闭）。
+`DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS` 调同步周期（0=关闭）；
+`DSH_REFERENCE_SESSION_COLLECTOR_SYNC_BUDGET_MS` 调单轮时间预算（缺省 20000；**0=不限**）。
+
+## 规模边界
+
+- **单轮有时间预算**（缺省 20s < interval 30s）：预算只拦「尚未开始的会话」—— `syncOne` 里
+  `readFileSync` / decode / project / `replaceSession` 全是**不可中断的同步段**，预算拦不住它们。
+  第一个会话总是放行，否则预算小于单会话耗时时会出现零进度轮。
+- **不完整轮禁止剪枝**：预算中断、发现被 `DISCOVERY_LIMIT` 截断、`sessions` 根缺失三种情况下，
+  「这轮没扫到」≠「宿主已删除」，一律不动手删投影（误删不可逆，宁留陈旧行）。
+- **续扫游标**：预算中断后下一轮从断点环形起扫（内存态，重启归零）。没有它就会出现活锁 ——
+  预算总在 walk 头部耗尽，尾部会话永远轮不到，而头部每轮 stat-skip 全命中（表面「同步一直正常」）。
+- **单会话仍无上界**：一个超大 session 的一次全量重写（事务内 DELETE+INSERT）不受轮预算保护，
+  也不可中断。要治需在投影层分块 + 增量 upsert（会触及幂等重放契约），目前是已知边界。
 
 ## 状态与开发
 

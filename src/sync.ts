@@ -51,6 +51,26 @@ export interface DiscoveredSessionLog {
 export const DISCOVERY_LIMIT = 5000
 
 /**
+ * 单轮同步的时间预算缺省 20s(< interval 30s):一轮必须落在两次触发之间,
+ * 否则轮轮相撞——syncAll 撞旗标直接 busy,等于什么都没做。
+ */
+export const DEFAULT_SYNC_BUDGET_MS = 20_000
+
+export const SYNC_BUDGET_ENV = 'DSH_REFERENCE_SESSION_COLLECTOR_SYNC_BUDGET_MS'
+
+/**
+ * 解析单轮预算:env 缺省 20s;**0 = 不限**(首轮建全库用——注意它与 interval 的
+ * 0=关闭语义相反);负数/非法 → 回落缺省(不把笔误变成失效)。
+ */
+export function resolveSyncBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[SYNC_BUDGET_ENV]
+  if (raw === undefined || raw.trim() === '') return DEFAULT_SYNC_BUDGET_MS
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_SYNC_BUDGET_MS
+  return Math.floor(parsed)
+}
+
+/**
  * 走 `~/.dsh/sessions` 发现会话目录(与 CCI discoverBackfillSessionLogs 同构):
  * 目录内无任何代次产物与暂存残留 → 视为路径中间层继续下钻;有当前代产物 →
  * 收录。上限截断,不抛。
@@ -230,6 +250,14 @@ export interface SyncResult {
   pruned: string[]
   basis: SyncBasis
   durationMs: number
+  /**
+   * 本轮因时间预算耗尽而提前收手 ⇒ **不完整轮**。`totalDiscovered` 仍是全集,
+   * 实际处理了 `updated+skipped+softSkips+failures` 个,其余在 `deferred`。
+   * 不完整轮**禁止剪枝**(没扫到 ≠ 已被删除),并靠 `resumeCursor` 下轮续扫。
+   */
+  budgetExhausted: boolean
+  /** 本轮未处理的会话数(0 = 本轮扫完);下轮从断点续。 */
+  deferred: number
 }
 
 function emptyResult(busy: boolean, basis: SyncBasis): SyncResult {
@@ -244,6 +272,8 @@ function emptyResult(busy: boolean, basis: SyncBasis): SyncResult {
     pruned: [],
     basis,
     durationMs: 0,
+    budgetExhausted: false,
+    deferred: 0,
   }
 }
 
@@ -273,6 +303,11 @@ export class ProjectionSync {
   private lastResult: SyncResult | undefined
   /** 软跳 warn 一次性:sessionId+state 为键,重复轮不再刷屏。 */
   private readonly warnedSoftSkips = new Set<string>()
+  /**
+   * 预算中断的续扫游标(discovered 下标)。只在内存:重启归零天然复位,
+   * 不需要持久化——它是调度优化,不是事实源。
+   */
+  private resumeCursor = 0
 
   constructor(options: ProjectionSyncOptions) {
     this.store = options.store
@@ -294,12 +329,15 @@ export class ProjectionSync {
    * 一轮增量同步:发现 → 逐会话(水位预查/软跳/投影/落库/让路)。
    * 重入直接返回 busy(不排队——下一轮 interval 自然补上)。
    */
-  async syncAll(input: { dshHome?: string; limit?: number } = {}): Promise<SyncResult> {
+  async syncAll(input: { dshHome?: string; limit?: number; budgetMs?: number } = {}): Promise<SyncResult> {
     if (this.syncing) {
       return this.lastResult ?? emptyResult(true, 'unprobed')
     }
     this.syncing = true
     const startedAt = Date.now()
+    const budgetMs = input.budgetMs ?? resolveSyncBudgetMs()
+    // 0 = 不限:用 Infinity 而不是 0,避开"0 毫秒预算立刻超时"的写法歧义
+    const deadline = budgetMs > 0 ? startedAt + budgetMs : Number.POSITIVE_INFINITY
     try {
       const dshHome = resolveDshHome(input.dshHome)
       const archivedSet = readArchivedSessionIds(dshHome)
@@ -314,8 +352,24 @@ export class ProjectionSync {
       const result: SyncResult = {
         ok: true, busy: false, totalDiscovered: discovered.length,
         updated: 0, skipped: 0, softSkips: [], failures: [], pruned: [], basis, durationMs: 0,
+        budgetExhausted: false, deferred: 0,
       }
-      for (const found of discovered) {
+      // 环状起扫:上轮断在 resumeCursor,本轮从那里继续。不轮转的话预算总在 walk
+      // 头部耗尽 ⇒ 尾部会话永远轮不到,而头部每轮 stat-skip 全命中 —— 表面上
+      // "同步一直在跑、一直 ok",实际是活锁。
+      const start = discovered.length === 0 ? 0 : this.resumeCursor % discovered.length
+      const order = discovered.length === 0 ? [] : [...discovered.slice(start), ...discovered.slice(0, start)]
+      let handled = 0
+      for (const found of order) {
+        /**
+         * 预算只拦"尚未开始"的会话,而且**第一个会话总是放行**:一次 syncOne 里
+         * readFileSync/decode/project/replaceSession 全同步不可中断,预算拦不住它们;
+         * 若连第一个也拦,预算小于单会话耗时时会出现零进度轮——游标不前进,又是一种活锁。
+         */
+        if (handled > 0 && Date.now() >= deadline) {
+          result.budgetExhausted = true
+          break
+        }
         try {
           this.syncOne(found, { archivedSet, exact, result, dictEvicted })
         } catch (error) {
@@ -324,16 +378,21 @@ export class ProjectionSync {
             error: String((error as Error)?.message ?? error),
           })
         }
+        handled += 1
         // 让路(回填同款):每会话一片,宿主主线程可插话。
         await new Promise<void>(resolve => { setImmediate(resolve) })
       }
+      if (discovered.length > 0) this.resumeCursor = (start + handled) % discovered.length
+      result.deferred = result.budgetExhausted ? discovered.length - handled : 0
       // 删除剪枝(2026-10-20 用户定标):被宿主删掉的会话目录=UUID 级联清除
       // 对应投影,WAL 事务里删 segments/segments_fts/replaces/sessions 四表。
       // 守护:sessions 根缺失(整目录被搬走/挂盘故障)或发现被 limit 截断时
       // 不动手——宁可留陈旧行,绝不误删全集。
       const sessionsRootExists = existsSync(join(dshHome, 'sessions'))
       const discoveryTruncated = discovered.length >= limit
-      if (sessionsRootExists && !discoveryTruncated) {
+      // 预算中断同样是**不完整轮**:discovered 只走过一部分,"这轮没扫到"绝不等于
+      // "宿主已删除"。误删不可逆,所以宁可不剪枝、留陈旧行。
+      if (sessionsRootExists && !discoveryTruncated && !result.budgetExhausted) {
         const aliveDirs = new Set(discovered.map(found => found.dirSessionId))
         for (const projected of this.store.listProjectedDirs()) {
           if (aliveDirs.has(projected.dirId)) continue
@@ -352,6 +411,7 @@ export class ProjectionSync {
       }
       result.durationMs = Date.now() - startedAt
       // R5:轮尾持久化水位(重投已使字典增长;取循环后的现值写入)。
+      // 预算中断也要写:跳过它会让下一轮把"自己没扫完"误判成"字典被驱逐"而全量重投。
       this.store.setBlocksWatermark(this.store.blocksWatermark().current)
       this.lastResult = result
       return result
