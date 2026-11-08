@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "会话原文投影同步器",
+    "description": "只读扫描 `~/.dsh/sessions/` 会话日志，解码后投影进插件自有 SQLite （segments / replaces / FTS5），经单条 fenced HTTP 路由对外提供 surface 标记、召回对账与中文可用的内容检索面。绝不写会话文件。"
+  }
+}

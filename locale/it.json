@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "sincronizzatore di proiezione delle sessioni",
+    "description": "Plugin DeepSeek Harness (DSH): scansisce in sola lettura i log di sessione in `~/.dsh/sessions/`, li decodifica e li proietta in una proiezione SQLite proprietaria (segments / replaces / FTS5)."
+  }
+}

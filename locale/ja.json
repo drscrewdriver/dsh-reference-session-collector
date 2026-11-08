@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "セッション原文プロジェクション同期器",
+    "description": "DeepSeek Harness (DSH) プラグイン: `~/.dsh/sessions/` のセッション ログを読み取り専用で走査し、復号後に独自 SQLite プロジェクション （segments / replaces / FTS5）へ投影。単一の fenced HTTP ルート `GET/POST /api/dsh-reference-session-collector` で surface マーク・リコール照合・ 中文対応の全文検索面を提供します。"
+  }
+}

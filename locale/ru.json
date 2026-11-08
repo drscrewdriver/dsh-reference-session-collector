@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "синхронизатор проекции сессий",
+    "description": "Плагин DeepSeek Harness (DSH): сканирует только на чтение журналы сессий в `~/.dsh/sessions/`, декодирует их и проецирует в собственную SQLite-проекцию (segments / replaces / FTS5)."
+  }
+}

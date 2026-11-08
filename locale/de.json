@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sitzungs-Projektionssynchronisierer",
+    "description": "DeepSeek-Harness(DSH)-Plugin: Liest die Sitzungsprotokolle unter `~/.dsh/sessions/` nur lesend, dekodiert sie und projiziert sie in eine eigene SQLite-Projektion (segments / replaces / FTS5)."
+  }
+}

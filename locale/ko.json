@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "세션 원문 투영 동기화기",
+    "description": "DeepSeek Harness(DSH) 플러그인: `~/.dsh/sessions/` 세션 로그를 읽기 전용으로 스캔하여 디코딩 후 자체 SQLite 투영 (segments / replaces / FTS5)에 적재. 단일 fenced HTTP 라우트 `GET/POST /api/dsh-reference-session-collector`로 surface 마크, 리콜 대사(對社), 중국어 전문 검색면을 제공합니다."
+  }
+}

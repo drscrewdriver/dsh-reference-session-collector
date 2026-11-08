@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session reference projection synchronizer",
+    "description": "Reads session logs under `~/.dsh/sessions` (read-only) and decodes them into one shared SQLite projection store: original text indexed by `session × turn/step × seq`, DeepSeek-vocabulary token lengths, CCI surface replacement markers…"
+  }
+}

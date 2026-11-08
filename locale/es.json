@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "sincronizador de proyección de sesiones",
+    "description": "Complemento de DeepSeek Harness (DSH): escanea solo en lectura los registros de sesión en `~/.dsh/sessions/`, los decodifica y los proyecta en una proyección SQLite propia (segments / replaces / FTS5)."
+  }
+}
