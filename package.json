@@ -1,6 +1,6 @@
 {
   "name": "dsh-reference-session-collector",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
     "tag": "latest",
@@ -65,6 +65,7 @@
     "README.fr.md",
     "README.ru.md",
     "README.it.md",
+    "README.pt.md",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "lib",

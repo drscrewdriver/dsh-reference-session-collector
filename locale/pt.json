@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sincronizador de projeção de referências de sessão",
+    "description": "Lê os registros de sessão em `~/.dsh/sessions` (somente leitura) e os decodifica em uma única loja de projeção compartilhada em SQLite: texto original indexado por `sessão × turno/passo × seq`, comprimentos de token do vocabulário do DeepSeek, marcadores de substituição da superfície CCI…"
+  }
+}

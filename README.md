@@ -34,7 +34,7 @@ session file; its only writes land in its own data directory.
 （9 测试文件 / 66 测试）含 dist 冒烟。**剩余**：消费方接线（一期 CCI
 对账 / 二期 steward 语料切换 / 三期 memory 锚点回填）与效率基准 T9.1。
 
-其余 8 语文档：README.en / ja / ko / de / es / fr / ru / it。
+其余 9 语文档：README.en / ja / ko / de / es / fr / ru / it / pt。
 
 ## 架构
 
