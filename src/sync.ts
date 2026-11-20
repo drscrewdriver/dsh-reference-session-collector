@@ -6,10 +6,12 @@
  * (T5.1)时绑定 L1 真身,单测注入 mock。接口字段与 plan spec §纯投影核心
  * 逐字对齐,L1 落地时不得改形。
  *
- * 只读纪律:readFileSync 是唯一触碰会话文件的调用;插件自身的写只落
- * projection.db(经 store 端口)。归档集只读 ~/.dsh/storages/workspace.json
- * 的 global.archivedSessionIds(坏文件=无归档;对齐 steward archive-source
- * 语义,T7.0 对照表复核)。每会话处理后 setImmediate 让路(CCI 回填同款);
+ * 只读纪律:读会话文件是本模块唯一触碰宿主数据的动作(`fs/promises.readFile`,
+ * issue #2 起改为异步);插件自身的写只落 projection.db(经 store 端口)。
+ * 归档集只读 ~/.dsh/storages/workspace.json 的 global.archivedSessionIds
+ * (坏文件=无归档;对齐 steward archive-source 语义,T7.0 对照表复核)。
+ * **让路在两处**:每会话处理完一次(CCI 回填同款),以及单会话内部
+ * (异步解码的帧/行批间 + 投影与落库前——issue #2,大会话不再占死主线程)。
  * syncing 旗标防重入;interval 轮 stat 全命中即零解码零重写。
  *
  * @module dsh-reference-session-collector/sync
