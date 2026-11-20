@@ -1,6 +1,6 @@
 {
   "name": "dsh-reference-session-collector",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
     "tag": "latest",

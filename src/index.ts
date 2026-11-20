@@ -8,7 +8,7 @@
  * - 双通道注册（direct `ctx.get` + `ctx.inject` 迟到臂），duplicate-route
  *   容错（同 lib 双挂载 = 成功），`ctx.effect` 注销。
  * - webServer 缺席时插件本体照常同步，仅 HTTP 面缺失（fail-soft）。
- * - 启动延迟 2.5s 首轮 syncAll + interval 轮（缺省 30s，env 可关）；
+ * - 启动延迟 2.5s 首轮 syncAll + interval 轮（缺省 5 分钟，env 可关/可调）；
  *   dispose 关库清定时器。
  *
  * - 跨插件读面：`drsReadFacade()` 返回绑本插件**活 QueryContext** 的只读门面（供
@@ -56,6 +56,8 @@ export { ProjectionSync, discoverSessionLogs, resolveDshHome, resolveIndexDir,
 export { decodeSessionLogBytes, decodeSessionLogFile, classifySessionHeader,
   readSessionGenerations, generationLogFilename,
   type DecodedEvent, type SessionLogRead } from './session-file-decode.ts'
+export { decodeSessionLogBytesAsync, DEFAULT_YIELD_EVERY_FRAMES, DEFAULT_YIELD_EVERY_LINES }
+  from './session-decode-async.ts'
 import {
   ProjectionSync,
   resolveIndexDir,

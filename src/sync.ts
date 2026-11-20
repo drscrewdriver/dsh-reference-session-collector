@@ -15,17 +15,23 @@
  * @module dsh-reference-session-collector/sync
  */
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   classifySessionHeader,
-  decodeSessionLogBytes,
   readSessionGenerations,
   type DecodedEvent,
   type GenerationArtifact,
 } from './session-file-decode.ts'
+import { decodeSessionLogBytesAsync } from './session-decode-async.ts'
 import { deepSeekV4TokenizerForModel } from './deepseek-v4-tokenizer.ts'
 import type { CanonicalTextTokenCounter } from './token-count.ts'
+
+/** 让一次事件循环（宏任务边界，宿主请求得以插话）。 */
+function yieldToLoop(): Promise<void> {
+  return new Promise<void>(resolve => { setImmediate(resolve) })
+}
 
 /**
  * DRS 放行代次集（按文件头自声明 version 判，不猜宿主版本）。
@@ -258,6 +264,11 @@ export interface SyncResult {
   budgetExhausted: boolean
   /** 本轮未处理的会话数(0 = 本轮扫完);下轮从断点续。 */
   deferred: number
+  /**
+   * 本轮最慢的一个会话(issue #2 诉求 3:定位卡顿)。只统计真正解码的会话,
+   * stat 命中跳过的不参与;整轮零解码时为 undefined。
+   */
+  slowest?: { sessionId: string; bytes: number; ms: number }
 }
 
 function emptyResult(busy: boolean, basis: SyncBasis): SyncResult {
@@ -362,16 +373,17 @@ export class ProjectionSync {
       let handled = 0
       for (const found of order) {
         /**
-         * 预算只拦"尚未开始"的会话,而且**第一个会话总是放行**:一次 syncOne 里
-         * readFileSync/decode/project/replaceSession 全同步不可中断,预算拦不住它们;
-         * 若连第一个也拦,预算小于单会话耗时时会出现零进度轮——游标不前进,又是一种活锁。
+         * 预算只拦"尚未开始"的会话,而且**第一个会话总是放行**:预算在会话**边界**
+         * 检查,单会话内部不会被打断(异步分片让路只是把控制权交还事件循环,
+         * 不改变"这一轮要不要开始这个会话"的判断);若连第一个也拦,预算小于单
+         * 会话耗时时会出现零进度轮——游标不前进,又是一种活锁。
          */
         if (handled > 0 && Date.now() >= deadline) {
           result.budgetExhausted = true
           break
         }
         try {
-          this.syncOne(found, { archivedSet, exact, result, dictEvicted })
+          await this.syncOne(found, { archivedSet, exact, result, dictEvicted })
         } catch (error) {
           result.failures.push({
             sessionId: found.dirSessionId,
@@ -380,7 +392,7 @@ export class ProjectionSync {
         }
         handled += 1
         // 让路(回填同款):每会话一片,宿主主线程可插话。
-        await new Promise<void>(resolve => { setImmediate(resolve) })
+        await yieldToLoop()
       }
       if (discovered.length > 0) this.resumeCursor = (start + handled) % discovered.length
       result.deferred = result.budgetExhausted ? discovered.length - handled : 0
@@ -413,6 +425,15 @@ export class ProjectionSync {
       // R5:轮尾持久化水位(重投已使字典增长;取循环后的现值写入)。
       // 预算中断也要写:跳过它会让下一轮把"自己没扫完"误判成"字典被驱逐"而全量重投。
       this.store.setBlocksWatermark(this.store.blocksWatermark().current)
+      // issue #2 诉求 3:每轮耗时与最慢会话可观测。只在真正动过手的轮次打,
+      // 全 stat 命中的空转轮不刷屏。
+      if (result.updated > 0 || result.budgetExhausted || result.failures.length > 0) {
+        const slowest = result.slowest === undefined
+          ? 'none'
+          : `${result.slowest.sessionId}(${result.slowest.bytes}B,${result.slowest.ms}ms)`
+        this.log('info', 'drs sync: round updated=%d skipped=%d deferred=%d dur=%dms slowest=%s',
+          result.updated, result.skipped, result.deferred, result.durationMs, slowest)
+      }
       this.lastResult = result
       return result
     } finally {
@@ -420,7 +441,20 @@ export class ProjectionSync {
     }
   }
 
-  private syncOne(found: DiscoveredSessionLog, ctx: SyncOneContext): void {
+  /**
+   * 同步一个会话（issue #2：**异步分片**，不再独占主线程）。
+   *
+   * 旧实现是纯同步方法：`readFileSync` + 同步解码 + 同步投影 + 同步落库一气
+   * 呵成，62MB 大会话期间宿主请求全部排队（issue 实测发消息要等几十秒）。
+   * 现在四段各自让路：
+   * 1. 读取走 `fs/promises`（线程池，不占主线程）；
+   * 2. 解码走 {@link decodeSessionLogBytesAsync}（异步 zstd + 帧/行批间让路）；
+   * 3. 投影前让路一次（投影端口保持同步签名，真分批留给后续的帧级增量方案）；
+   * 4. 落库前让路一次（SQLite 事务必须原子，保持同步）。
+   * @param found - 发现事实。
+   * @param ctx - 本轮共享上下文。
+   */
+  private async syncOne(found: DiscoveredSessionLog, ctx: SyncOneContext): Promise<void> {
     const record = this.store.getSessionByDir(found.dirSessionId)
     const statHit = !ctx.dictEvicted
       && record !== undefined
@@ -437,8 +471,10 @@ export class ProjectionSync {
       ctx.result.skipped += 1
       return
     }
-    // readFileSync:唯一触碰会话文件的调用,永远没有写对偶。
-    const log = decodeSessionLogBytes(readFileSync(found.artifact.path))
+    const sessionStartedAt = Date.now()
+    // 读取:唯一触碰会话文件的调用,永远没有写对偶。异步版走线程池。
+    const bytes = await readFile(found.artifact.path)
+    const log = await decodeSessionLogBytesAsync(bytes)
     const verdict = classifySessionHeader(log.header, ACCEPTED_FORMAT_GENERATIONS)
     if (verdict.state !== 'known') {
       const key = `${found.dirSessionId}:${verdict.state}`
@@ -452,24 +488,44 @@ export class ProjectionSync {
     const headerId = log.header?.['id']
     const sessionId = typeof headerId === 'string' && headerId.trim() !== '' ? headerId.trim() : found.dirSessionId
     const archived = ctx.archivedSet.has(sessionId) ? 1 : 0
+    // 投影前让路:投影端口仍是同步实现,先把控制权交还宿主再进入。
+    await yieldToLoop()
     const projection = this.project(log.events, {
       dirId: found.dirSessionId,
       ...(log.header === undefined ? {} : { header: log.header }),
       ...(ctx.exact === undefined ? {} : { exactCounter: ctx.exact }),
     })
+    // 落库前让路:SQLite 事务必须原子,但进入事务之前不该和别的请求抢。
+    await yieldToLoop()
     this.store.replaceSession(projection, {
       artifactBytes: found.artifact.bytes,
       artifactMtimeMs: found.artifact.mtimeMs,
       archived,
     })
     ctx.result.updated += 1
+    this.noteSlowest(ctx.result, found, sessionStartedAt)
+  }
+
+  /** 记录本轮最慢会话（issue #2 诉求 3：可观测）。 */
+  private noteSlowest(result: SyncResult, found: DiscoveredSessionLog, startedAt: number): void {
+    const ms = Date.now() - startedAt
+    if (result.slowest !== undefined && result.slowest.ms >= ms) return
+    result.slowest = { sessionId: found.dirSessionId, bytes: found.artifact.bytes, ms }
   }
 }
 
 // ─────────────────────────── interval 调度 ───────────────────────────
 
-/** interval 轮缺省周期:steward 二期新鲜度(≤1 分钟)靠它,不靠手动 POST。 */
-export const DEFAULT_SYNC_INTERVAL_MS = 30_000
+/**
+ * interval 轮缺省周期。
+ *
+ * issue #2 前是 30s,理由是「steward 二期新鲜度(≤1 分钟)靠它,不靠手动 POST」。
+ * 但 30s 在大库(issue 实测 projection.db 约 3GB / 数千会话)上会把主线程反复
+ * 拖进全量重扫,代价远大于那 1 分钟新鲜度收益,故缺省改为 5 分钟。
+ * 需要旧行为的用户显式设 `DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS=30000`
+ * (issue 报告人正是用 env 调到 10 分钟规避的)。
+ */
+export const DEFAULT_SYNC_INTERVAL_MS = 300_000
 
 export const SYNC_INTERVAL_ENV = 'DSH_REFERENCE_SESSION_COLLECTOR_SYNC_INTERVAL_MS'
 
