@@ -33,9 +33,9 @@ import {
   type QueryContext,
   type SessionDetailOptions,
 } from './surface.ts'
-import { openProjectionStore, type ProjectionStore, type SessionRow } from './schema.ts'
-import { projectSessionEvents } from './projection.ts'
-import type { SessionProjection } from './projection.ts'
+import { openProjectionStore, type FrameWatermark, type ProjectionStore, type SessionRow } from './schema.ts'
+import { projectSessionEvents, projectSessionIncremental } from './projection.ts'
+import type { ProjectionPrior, SessionIncrementDelta, SessionProjection, SessionSummary } from './projection.ts'
 
 // steward 式导出面：库/投影/切词/查询/同步 API 对消费方（与单测）可导入。
 export { openProjectionStore, reloadSummaries, PROJECTION_SCHEMA_VERSION,
@@ -117,6 +117,20 @@ function isTrustedRequest(req: IncomingMessage, trustedHosts: readonly string[] 
 /** R5 水位在 meta 表的键（DDL 冻结不动，kv 面落）。 */
 const BLOCKS_WATERMARK_META_KEY = 'blocks_watermark'
 
+/** SyncReplaceMeta.frame → schema FrameWatermark（增量路径 roll 由 delta 终值合并）。 */
+function frameFromMeta(meta: SyncReplaceMeta, delta?: SessionIncrementDelta): FrameWatermark | undefined {
+  const frame = meta.frame
+  if (frame === undefined) return undefined
+  return {
+    frame_offset: frame.frameOffset,
+    frame_consumed: frame.frameConsumed,
+    frame_roll_turn: frame.frameRollTurn ?? delta?.rollTurn ?? 0,
+    frame_roll_step: frame.frameRollStep ?? delta?.rollStep ?? 0,
+    frame_basis: frame.frameBasis,
+    frame_artifact: frame.frameArtifact,
+  }
+}
+
 /** sync 端口 → ProjectionStore 真身适配（dir 水位经常驻 Map 扫描）。 */
 export function createStorePort(store: ProjectionStore): SyncStorePort {
   return {
@@ -128,13 +142,75 @@ export function createStorePort(store: ProjectionStore): SyncStorePort {
           artifactBytes: row.artifact_bytes,
           artifactMtimeMs: row.artifact_mtime_ms,
           archived: row.archived,
+          frameOffset: row.frame_offset,
+          frameConsumed: row.frame_consumed,
+          frameRollTurn: row.frame_roll_turn,
+          frameRollStep: row.frame_roll_step,
+          frameBasis: row.frame_basis,
+          frameArtifact: row.frame_artifact,
+          formatGeneration: row.format_generation,
         }
       }
       return undefined
     },
     replaceSession(projection: unknown, meta: SyncReplaceMeta): void {
+      const frame = frameFromMeta(meta)
       store.replaceSession(projection as SessionProjection, meta.artifactBytes, meta.artifactMtimeMs, {
         archived: meta.archived === 1 ? 1 : 0,
+        ...(frame !== undefined ? { frame } : {}),
+      })
+    },
+    getSessionState(sessionId: string): unknown | undefined {
+      const state = store.getSessionState(sessionId)
+      if (state === undefined) return undefined
+      const row = state.row
+      // ProjectionPrior 桥接：sessions 行 → summary（camelCase）+ 窄视图 + 水位滚动值。
+      const summary: SessionSummary = {
+        sessionId: row.session_id,
+        dirId: row.dir_id,
+        title: row.title,
+        cwd: row.cwd,
+        eventCount: row.event_count,
+        maxSeq: row.max_seq,
+        turnCount: row.turn_count,
+        segmentTokens: row.segment_tokens,
+        surfaceTokens: row.surface_tokens,
+        grossSaved: row.gross_saved,
+        recallTokens: row.recall_tokens,
+        compressPairs: row.compress_pairs,
+        recallPairs: row.recall_pairs,
+        basis: row.basis === 'ds-token' ? 'ds-token' : 'chars/4',
+        lastTimeMs: row.last_time_ms,
+        formatGeneration: row.format_generation,
+      }
+      const prior: ProjectionPrior = {
+        summary,
+        rollTurn: row.frame_roll_turn,
+        rollStep: row.frame_roll_step,
+        segments: state.segments.map(seg => ({
+          seq: seg.seq,
+          tokens: seg.tokens,
+          onSurface: seg.on_surface as 0 | 1,
+          compressed: seg.compressed as 0 | 1,
+          replacedBy: seg.replaced_by,
+          surfaceTokens: seg.surface_tokens,
+        })),
+        replaces: state.replaces.map(rep => ({
+          seq: rep.seq,
+          aTokens: rep.a_tokens,
+          bTokens: rep.b_tokens,
+          kind: rep.kind,
+          live: rep.live as 0 | 1,
+        })),
+      }
+      return prior
+    },
+    applyIncrement(sessionId: string, delta: unknown, meta: SyncReplaceMeta): void {
+      const typed = delta as SessionIncrementDelta
+      const frame = frameFromMeta(meta, typed)
+      store.applyIncrement(sessionId, typed, meta.artifactBytes, meta.artifactMtimeMs, {
+        archived: meta.archived === 1 ? 1 : 0,
+        ...(frame !== undefined ? { frame } : {}),
       })
     },
     setSessionArchived(sessionId: string, archived: number): void {
@@ -487,6 +563,17 @@ export function apply(ctx: Context): void {
         project: (events, options) => projectSessionEvents(events, {
           dirId: options.dirId,
           ...(options.header === undefined ? {} : { header: options.header }),
+          ...(options.exactCounter === undefined ? {} : {
+            exactCounter: (text: string): number => {
+              const count = options.exactCounter?.(text)
+              return count !== undefined && count.kind === 'exact-tokenizer'
+                ? count.tokens
+                : Math.ceil(text.length / 4)
+            },
+          }),
+        }),
+        projectIncremental: (newEvents, prior, options) => projectSessionIncremental(newEvents, prior as ProjectionPrior, {
+          dirId: options.dirId,
           ...(options.exactCounter === undefined ? {} : {
             exactCounter: (text: string): number => {
               const count = options.exactCounter?.(text)

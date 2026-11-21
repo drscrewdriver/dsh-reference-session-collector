@@ -64,6 +64,9 @@ function createStore(): SyncStorePort & { byDir: Map<string, { sessionId: string
     byDir,
     replaces,
     getSessionByDir(dirId) { return byDir.get(dirId) },
+    // v6 帧级增量端口:mock 面缺省无先验(增量路径自动回退全量)。
+    getSessionState() { return undefined },
+    applyIncrement() { /* 本 spec 不走增量 */ },
     replaceSession(projection, meta) {
       replaces.push({ projection, meta })
       const summary = (projection as { summary: { sessionId: string; dirId: string } }).summary

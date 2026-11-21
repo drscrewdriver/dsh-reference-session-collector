@@ -161,3 +161,139 @@ export async function decodeSessionLogBytesAsync(
     ...(header === undefined ? {} : { header }),
   }
 }
+
+// ─────────────────────────── 帧级增量尾段解码（issue #3） ───────────────────────────
+
+/** 事件流终态滚动归属（水位写入用）：最后一个 step/start 的 turn/step；无则 0/0。 */
+export function finalRollState(events: readonly DecodedEvent[]): { turn: number; step: number } {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]
+    if (event?.type !== 'step/start') continue
+    const data = typeof event.data === 'object' && event.data !== null
+      ? (event.data as { turn?: unknown; step?: unknown })
+      : undefined
+    return {
+      turn: typeof data?.turn === 'number' ? data.turn : 0,
+      step: typeof data?.step === 'number' ? data.step : 0,
+    }
+  }
+  return { turn: 0, step: 0 }
+}
+
+/** 尾段解码读数（{@link decodeSessionLogTailAsync} 产出）。 */
+export interface SessionLogTailRead {
+  /**
+   * 尾段起点是否为合法帧边界（zstd 魔数可扫）。false = 明文产物/字节错位
+   * （宿主回缩重写等）——调用方必须回退全量，绝不猜。
+   */
+  boundaryOk: boolean
+  /** 完整帧内稠密解码的事件（seq 为绝对值；torn 区域不消费）。 */
+  events: DecodedEvent[]
+  /** 尾段内首个事件的 seq（空尾段/零事件=undefined）。 */
+  firstSeq?: number
+  /** 尾段内末个事件的 seq。 */
+  lastSeq?: number
+  /** 完整帧数。 */
+  frames: number
+  /** 水位停靠位：**尾段 buffer 内的相对偏移**（torn 起点，或尾段末尾）。 */
+  consumedEndOffset: number
+  /** 解码问题清单（非空=调用方回退全量）。 */
+  issues: { line: number; why: string }[]
+}
+
+/**
+ * 尾段解码（issue #3）：从**帧边界**起只解新增帧——O(新增) 读取与解压的
+ * 解码面。与 {@link decodeSessionLogTailAsync} 全量版的差异：
+ * - **torn 区域不消费**（全量版会抢救明文行）——torn 字节会被宿主
+ *   truncateTornTail 重写，字节水位对重写区不稳定；跳过它，下一轮在
+ *   重写后的完整帧里按 seq 前缀去重接续（see sync 侧 dedup 规则）。
+ * - seq 稠密校验以**尾段首个事件**为基（全量版从 0 起）——重写区回放
+ *   的历史事件 seq 不从 0 开始。
+ * - 首行 header 不在本面（header 在第一帧的解压文本里，增量路径不重读；
+ *   代次守卫走产物文件名版本 + sessions 行 format_generation）。
+ */
+export async function decodeSessionLogTailAsync(
+  tail: Buffer,
+  decoders?: OfficialDecoders,
+  yieldEveryFrames: number = DEFAULT_YIELD_EVERY_FRAMES,
+  yieldEveryLines: number = DEFAULT_YIELD_EVERY_LINES,
+): Promise<SessionLogTailRead> {
+  const { frames, tornStart } = scanZstdFrames(tail)
+  if (tail.length > 0 && frames.length === 0) {
+    // 尾段起点不是帧头：明文产物（compression=none）或字节错位——不猜，回退全量。
+    return { boundaryOk: false, events: [], frames: 0, consumedEndOffset: 0, issues: [] }
+  }
+  const parts: Buffer[] = []
+  const frameIssues: string[] = []
+  let sinceYield = 0
+  for (const frame of frames) {
+    try {
+      parts.push(await zstdDecompressAsync(tail.subarray(frame.start, frame.end)))
+    } catch (err) {
+      frameIssues.push(`frame@${frame.start}: ${String(err instanceof Error ? err.message : err)}`)
+    }
+    sinceYield += 1
+    if (yieldEveryFrames > 0 && sinceYield >= yieldEveryFrames) {
+      sinceYield = 0
+      await yieldToLoop()
+    }
+  }
+  const consumedEndOffset = tornStart !== undefined ? tornStart : tail.length
+  if (frameIssues.length > 0) {
+    return {
+      boundaryOk: true, events: [], frames: frames.length, consumedEndOffset,
+      issues: frameIssues.map((why, index) => ({ line: index + 1, why })),
+    }
+  }
+  const text = Buffer.concat(parts).toString('utf8')
+  const lines = text.split('\n').filter(line => line.trim() !== '')
+  const decodeRecord = decoders?.decodeStorageRecord ?? decodeRecordLocal
+  const events: DecodedEvent[] = []
+  const issues: { line: number; why: string }[] = []
+  let base: number | undefined
+  let linesSinceYield = 0
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] as string
+    let decoded: DecodedEvent[]
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>
+      const withProvenance = parsed['sourceEventSeqs'] === undefined
+        ? parsed
+        : {
+            ...parsed,
+            sourceEventSeqs: decoders?.decodeSeqRanges !== undefined && typeof parsed['seq'] === 'number'
+              ? decoders.decodeSeqRanges(parsed['sourceEventSeqs'], parsed['seq'])
+              : decodeSeqRangesStorage(parsed['sourceEventSeqs'], Number(parsed['seq'] ?? 0)),
+          }
+      decoded = decodeRecord(withProvenance)
+    } catch (err) {
+      issues.push({ line: index + 1, why: `decode failed: ${String(err instanceof Error ? err.message : err)}` })
+      break
+    }
+    for (const event of decoded) {
+      if (base === undefined) base = event.seq
+      if (event.seq !== base + events.length) {
+        issues.push({ line: index + 1, why: `seq gap (expected ${base + events.length}, got ${event.seq})` })
+        return {
+          boundaryOk: true, events: [], frames: frames.length, consumedEndOffset, issues,
+        }
+      }
+      events.push(event)
+    }
+    linesSinceYield += 1
+    if (yieldEveryLines > 0 && linesSinceYield >= yieldEveryLines) {
+      linesSinceYield = 0
+      await yieldToLoop()
+    }
+  }
+  const first = events[0]
+  const last = events[events.length - 1]
+  return {
+    boundaryOk: true,
+    events,
+    ...(first !== undefined && last !== undefined ? { firstSeq: first.seq, lastSeq: last.seq } : {}),
+    frames: frames.length,
+    consumedEndOffset,
+    issues,
+  }
+}

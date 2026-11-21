@@ -17,7 +17,7 @@
  * @module dsh-reference-session-collector/sync
  */
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { open, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -26,13 +26,36 @@ import {
   type DecodedEvent,
   type GenerationArtifact,
 } from './session-file-decode.ts'
-import { decodeSessionLogBytesAsync } from './session-decode-async.ts'
+import { decodeSessionLogBytesAsync, decodeSessionLogTailAsync, finalRollState } from './session-decode-async.ts'
 import { deepSeekV4TokenizerForModel } from './deepseek-v4-tokenizer.ts'
 import type { CanonicalTextTokenCounter } from './token-count.ts'
 
 /** 让一次事件循环（宏任务边界，宿主请求得以插话）。 */
 function yieldToLoop(): Promise<void> {
   return new Promise<void>(resolve => { setImmediate(resolve) })
+}
+
+/**
+ * 只读文件尾段（issue #3）：从字节偏移读到 EOF——增量路径 O(新增) 读取面
+ * （对比 readFile 全量）。调用方保证 offset 落在帧边界（水位语义）。
+ */
+async function readLogTail(path: string, offset: number): Promise<Buffer> {
+  const handle = await open(path, 'r')
+  try {
+    const { size } = await handle.stat()
+    const length = size - offset
+    if (length <= 0) return Buffer.alloc(0)
+    const buf = Buffer.alloc(length)
+    let read = 0
+    while (read < length) {
+      const { bytesRead } = await handle.read(buf, read, length - read, offset + read)
+      if (bytesRead === 0) break
+      read += bytesRead
+    }
+    return read === length ? buf : buf.subarray(0, read)
+  } finally {
+    await handle.close()
+  }
 }
 
 /**
@@ -181,6 +204,33 @@ export interface SyncWatermark {
   artifactBytes: number
   artifactMtimeMs: number
   archived: number
+  /** 帧级增量水位面(issue #3,真身=sessions 行 frame_* 列);undefined=旧 mock/无水位。 */
+  frameOffset?: number
+  frameConsumed?: number
+  frameRollTurn?: number
+  frameRollStep?: number
+  frameBasis?: string
+  frameArtifact?: string
+  /** 建水位时的 header 自声明代次(与产物文件名版本对照,漂移=回退全量)。 */
+  formatGeneration?: number
+}
+
+/** 帧级增量水位(sync 侧形状;真身=FrameWatermark 列值,经端口适配)。 */
+export interface SyncFrameWatermark {
+  /** 下一帧字节偏移(绝对);torn 起点或 EOF。 */
+  frameOffset: number
+  /** 已投影事件数(seq 稠密 0..consumed-1,含全量路径的 torn 抢救行)。 */
+  frameConsumed: number
+  /**
+   * 水位处 turn/step 滚动归属。全量路径直接给值;增量路径省略(-)
+   * ——由投影 delta 携带终值,端口适配层合并。
+   */
+  frameRollTurn?: number
+  frameRollStep?: number
+  /** token 口径档('chars/4'|'ds-token'),与本轮不一致→回退全量。 */
+  frameBasis: string
+  /** 水位所属产物文件名(换代=新文件=旧偏移作废)。 */
+  frameArtifact: string
 }
 
 /** replaceSession 附带元数据:水位 + 本轮归档态。 */
@@ -188,6 +238,8 @@ export interface SyncReplaceMeta {
   artifactBytes: number
   artifactMtimeMs: number
   archived: number
+  /** 帧级水位(全量成功后建立;明文产物/失败不写=undefined→下次仍全量)。 */
+  frame?: SyncFrameWatermark
 }
 
 /**
@@ -213,6 +265,14 @@ export interface SyncStorePort {
   blocksWatermark(): { current: number; last: number }
   /** 轮尾持久化本轮字典水位(下轮 skip 判定基线)。 */
   setBlocksWatermark(value: number): void
+  /**
+   * 帧级增量先验状态(issue #3):会话现状不透明载荷(sessions 行窄投影 +
+   * 全量 segments/replaces 窄视图 + 水位滚动值),经 projectIncremental 消费。
+   * O(会话行数) 纯 SQL 读,无解压。无行=undefined。
+   */
+  getSessionState(sessionId: string): unknown | undefined
+  /** 帧级增量落库:delta 与 prior 同族不透明(真身=schema applyIncrement)。 */
+  applyIncrement(sessionId: string, delta: unknown, meta: SyncReplaceMeta): void
 }
 
 export type SyncLog = (level: 'info' | 'warn', message: string, ...args: unknown[]) => void
@@ -293,6 +353,11 @@ function emptyResult(busy: boolean, basis: SyncBasis): SyncResult {
 export interface ProjectionSyncOptions {
   store: SyncStorePort
   project: ProjectionPort
+  /**
+   * 帧级增量投影端口(issue #3):先验不透明载荷 + 新事件 → 落库载荷(不透明,
+   * 真身=projectSessionIncremental)。缺席=增量面整体停用(全量路径照旧)。
+   */
+  projectIncremental?: (newEvents: readonly DecodedEvent[], prior: unknown, options: ProjectionCallOptions) => unknown
   /** 缺省 console.warn 单臂(info 静默——宿主半另有 logger 接线面)。 */
   log?: SyncLog
   /** 'auto'(缺省)=探测 DS 精确计数器;'off'=强制 chars/4(单测/省资产加载)。 */
@@ -310,6 +375,7 @@ interface SyncOneContext {
 export class ProjectionSync {
   private readonly store: SyncStorePort
   private readonly project: ProjectionPort
+  private readonly projectIncremental: ProjectionSyncOptions['projectIncremental']
   private readonly log: SyncLog
   private readonly counterMode: 'auto' | 'off'
   private syncing = false
@@ -325,6 +391,7 @@ export class ProjectionSync {
   constructor(options: ProjectionSyncOptions) {
     this.store = options.store
     this.project = options.project
+    this.projectIncremental = options.projectIncremental
     this.counterMode = options.counter ?? 'auto'
     this.log = options.log ?? (() => {})
   }
@@ -474,6 +541,34 @@ export class ProjectionSync {
       return
     }
     const sessionStartedAt = Date.now()
+    // ── 帧级增量路径(issue #3):水位有效时只解尾段新帧,O(新增) 读取/解压/投影 ──
+    // 守卫链任一不满足即落回全量(全量是正确性兜底,增量只是优化)。
+    if (
+      record !== undefined && this.projectIncremental !== undefined && !ctx.dictEvicted
+      && record.frameOffset !== undefined && record.frameOffset >= 0
+      && record.frameConsumed !== undefined
+      && record.frameBasis === (ctx.exact !== undefined ? 'ds-token' : 'chars/4')
+      && record.frameArtifact === found.artifact.name
+      // 代次守卫不对照 artifact.version：gen-0 文件名无版本号而 header 自声明 v4
+      // 是宿主常态（e2e fixture 同构），两者本来就不等；同文件 append-only 下
+      // header 不会变，文件身份已由 frameArtifact（换代=新文件名）把守。
+      && found.artifact.bytes >= record.frameOffset
+    ) {
+      try {
+        // 守卫链已证 frameOffset/frameConsumed 有值;exactOptional 下显式收窄。
+        const wm: SyncWatermark & { frameOffset: number; frameConsumed: number } = {
+          ...record,
+          frameOffset: record.frameOffset,
+          frameConsumed: record.frameConsumed,
+        }
+        const handled = await this.syncOneIncremental(found, wm, ctx, sessionStartedAt)
+        if (handled) return
+      } catch (error) {
+        this.log('warn', 'drs sync: incremental failed for %s (%s) — full resync',
+          found.dirSessionId, String((error as Error)?.message ?? error))
+      }
+    }
+    // ── 全量路径(回退兜底 + 水位建立):行为与 0.2.11 逐字一致 ──
     // 读取:唯一触碰会话文件的调用,永远没有写对偶。异步版走线程池。
     const bytes = await readFile(found.artifact.path)
     const log = await decodeSessionLogBytesAsync(bytes)
@@ -499,13 +594,83 @@ export class ProjectionSync {
     })
     // 落库前让路:SQLite 事务必须原子,但进入事务之前不该和别的请求抢。
     await yieldToLoop()
+    // 全量成功后建立帧级水位(issue #3):zstd 产物记 offset(EOF 或 torn 起点——
+    // torn 区域会被宿主重写,水位停在 torn 前,重写区由增量路径按 seq 前缀去重);
+    // 明文产物(frames=0)不建——下次仍全量。consumed 含 torn 抢救行(它们已投影)。
+    const roll = finalRollState(log.events)
+    const frame: SyncFrameWatermark | undefined = log.frames > 0 ? {
+      frameOffset: log.tornStart ?? bytes.length,
+      frameConsumed: log.events.length,
+      frameRollTurn: roll.turn,
+      frameRollStep: roll.step,
+      frameBasis: ctx.exact !== undefined ? 'ds-token' : 'chars/4',
+      frameArtifact: found.artifact.name,
+    } : undefined
     this.store.replaceSession(projection, {
       artifactBytes: found.artifact.bytes,
       artifactMtimeMs: found.artifact.mtimeMs,
       archived,
+      ...(frame !== undefined ? { frame } : {}),
     })
     ctx.result.updated += 1
     this.noteSlowest(ctx.result, found, sessionStartedAt)
+  }
+
+  /**
+   * 帧级增量同步单会话(issue #3)。返回 false = 本路径放弃(调用方落回全量);
+   * true = 已落库(含"零新事件仅推进水位"轮——mtime 漂移但无新帧)。
+   *
+   * 守卫链(syncOne 已判):水位存在/basis 同口径/产物同名/代次一致/文件未回缩。
+   * 本方法内的放弃面:先验行缺失、尾段起点非帧边界、解码问题、fresh 不连续。
+   */
+  private async syncOneIncremental(
+    found: DiscoveredSessionLog,
+    wm: SyncWatermark & { frameOffset: number; frameConsumed: number },
+    ctx: SyncOneContext,
+    sessionStartedAt: number,
+  ): Promise<boolean> {
+    const sessionId = wm.sessionId
+    const prior = this.store.getSessionState(sessionId)
+    if (prior === undefined) return false
+    // 读取:只读尾段(frame_offset 起,恰是帧边界)——O(新增) 字节,走线程池。
+    const tail = await readLogTail(found.artifact.path, wm.frameOffset)
+    await yieldToLoop()
+    const tailRead = await decodeSessionLogTailAsync(tail)
+    if (!tailRead.boundaryOk || tailRead.issues.length > 0) return false
+    // 去重切分:seq < consumed = 宿主 torn 重写区的已投影回放,按 seq 前缀丢弃;
+    // fresh = 真新事件。尾段事件内部稠密 ⇒ 有重复时其末尾必恰为 consumed-1,
+    // fresh 必须从 consumed 稠密续起(否则 = 字节事实与水位矛盾,回退全量)。
+    const consumed = wm.frameConsumed
+    const fresh: DecodedEvent[] = []
+    for (const event of tailRead.events) {
+      if (event.seq < consumed) continue
+      fresh.push(event)
+    }
+    if (fresh.length > 0 && fresh[0] !== undefined && fresh[0].seq !== consumed) return false
+    const archived = ctx.archivedSet.has(sessionId) ? 1 : 0
+    // 投影前让路:增量投影端口仍是同步实现(纯函数),先把控制权交还宿主。
+    await yieldToLoop()
+    const delta = this.projectIncremental!(fresh, prior, {
+      dirId: found.dirSessionId,
+      ...(ctx.exact === undefined ? {} : { exactCounter: ctx.exact }),
+    })
+    // 落库前让路:SQLite 事务必须原子。
+    await yieldToLoop()
+    this.store.applyIncrement(sessionId, delta, {
+      artifactBytes: found.artifact.bytes,
+      artifactMtimeMs: found.artifact.mtimeMs,
+      archived,
+      frame: {
+        frameOffset: wm.frameOffset + tailRead.consumedEndOffset,
+        frameConsumed: consumed + fresh.length,
+        // roll 由 delta 携带(投影侧终值,端口适配层合并进 FrameWatermark)。
+        frameBasis: ctx.exact !== undefined ? 'ds-token' : 'chars/4',
+        frameArtifact: found.artifact.name,
+      },
+    })
+    ctx.result.updated += 1
+    this.noteSlowest(ctx.result, found, sessionStartedAt)
+    return true
   }
 
   /** 记录本轮最慢会话（issue #2 诉求 3：可观测）。 */

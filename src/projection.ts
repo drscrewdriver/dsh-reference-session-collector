@@ -476,3 +476,343 @@ export function projectSessionEvents(
   }
   return { summary, segments, replaces }
 }
+
+// ─────────────────────────── 帧级增量投影（issue #3） ───────────────────────────
+
+/** 先验段行窄视图（存储侧 getSessionState 产出；链解析与翻转修正的最小面）。 */
+export interface PriorSegmentView {
+  seq: number
+  tokens: number
+  onSurface: 0 | 1
+  compressed: 0 | 1
+  replacedBy: number | null
+  surfaceTokens: number | null
+}
+
+/** 先验替换对窄视图（live 熄灭与 grossSaved 修正的最小面）。 */
+export interface PriorReplaceView {
+  seq: number
+  aTokens: number
+  bTokens: number
+  kind: 'compress' | 'recall'
+  live: 0 | 1
+}
+
+/** 增量投影的折叠基座：会话现状 + 水位处的滚动归属。 */
+export interface ProjectionPrior {
+  summary: SessionSummary
+  /** 水位处的 turn/step 滚动值（新事件从此续算）。 */
+  rollTurn: number
+  rollStep: number
+  segments: PriorSegmentView[]
+  replaces: PriorReplaceView[]
+}
+
+/** 先验行的定点落库更新（onSurface/compressed/surface 指针终值）。 */
+export interface IncrementSegmentUpdate {
+  seq: number
+  onSurface: 0 | 1
+  compressed: 0 | 1
+  surfaceTokens: number | null
+  replacedBy: number | null
+}
+
+/** 一次增量投影的落库载荷（applyIncrement 的输入）。 */
+export interface SessionIncrementDelta {
+  /** 新段行（链解析后的 surface_tokens/replaced_by 终值）。 */
+  newSegments: ProjectionSegment[]
+  /** 新替换对（含批内 live 语义）。 */
+  newReplaces: ProjectionReplace[]
+  /** 先验段行的翻转与链尾连带更新。 */
+  priorSegmentUpdates: IncrementSegmentUpdate[]
+  /** 先验对被新覆盖熄灭（live 1→0）的 seq。 */
+  priorReplaceLiveOff: number[]
+  /** 合并后的会话汇总（可加字段 + 翻转修正）。 */
+  summary: SessionSummary
+  /** 本批事件后的 turn/step 滚动终值（水位推进写入面）。 */
+  rollTurn: number
+  rollStep: number
+}
+
+/**
+ * 帧级增量投影（issue #3）：只折叠**新增帧的事件**，先验状态从库读入。
+ *
+ * 正确性依据（与 {@link projectSessionEvents} 全量投影的等价性）：
+ * - 日志 append-only + 事件 seq 稠密 ⇒ 新事件 seq 严格大于全部先验 seq；
+ *   replace 区间 end < 自身 seq ⇒ **旧覆盖永远够不到新段行**，新段行的
+ *   onSurface/compressed 只由新 covered 集决定。
+ * - covered 集只有 add（:349）⇒ 先验行的翻转**单向 1→0**，影响集 =
+ *   新覆盖范围 ∩ 先验行（有界）；surfaceTokens/grossSaved 在翻转点上
+ *   减去对应份额，可加字段直接合并。
+ * - 指针链解析在全量投影里是"直接替身 → 链跳到终替"；先验行落库的是
+ *   **终替值**，重跑链解析幂等（终替未变时结果不变），终替被新覆盖时
+ *   自然续跳——因此先验行 + 新行合并视图统一重跑一次链解析即可，
+ *   变化行进 priorSegmentUpdates（链尾连带行也在内）。
+ * - turn/step 归属是前向滚动：从水位处的 roll 续算即可。
+ *
+ * 已知边界：surfaceText（不落库，读侧经 blocks 链派生）只在终替是**新行**
+ * 时按全量口径精化；终替是先验行时保留直接替身文本的占位——非契约面。
+ * 链解析是 O(会话段行数) 的内存遍历（无解压）——相对被消掉的 zstd 全量
+ * 重解压小数个量级，README「规模边界」如实标注。
+ */
+export function projectSessionIncremental(
+  newEvents: readonly DecodedEvent[],
+  prior: ProjectionPrior,
+  options: ProjectionOptions,
+): SessionIncrementDelta {
+  const dirId = options.dirId
+  const sessionId = options.sessionId ?? prior.summary.sessionId
+  const counter = options.exactCounter
+  const countOne = (text: string): number => counter?.(text) ?? Math.ceil(text.length / CHARS_PER_TOKEN)
+
+  // 先验 token 索引：新替换对覆盖旧 seq 时 aTokens 求和的回退面（无段行的
+  // 事件在全量投影里 tokens 恒 0，缺行=0 同语义）。
+  const priorTokensBySeq = new Map<number, number>()
+  for (const row of prior.segments) priorTokensBySeq.set(row.seq, row.tokens)
+
+  // 第一遍：新事件 tokens/text 索引。
+  const tokensBySeq = new Map<number, number>()
+  const textBySeq = new Map<number, string>()
+  for (const event of newEvents) {
+    const blocks = modelTextBlocks(event)
+    let tokens = 0
+    for (const block of blocks) tokens += countOne(block)
+    tokensBySeq.set(event.seq, tokens)
+    textBySeq.set(event.seq, blocks.join('\n'))
+  }
+
+  // 第二遍：新替换对 + 新 covered 集；turn/step 从水位滚动值续算。
+  const replaces: ProjectionReplace[] = []
+  const covered = new Set<number>()
+  const pointerBySeq = new Map<number, { seq: number; turn: number; step: number }>()
+  let scanTurn = prior.rollTurn
+  let scanStep = prior.rollStep
+  for (const event of newEvents) {
+    const data = isRecord(event.data) ? (event.data as { turn?: unknown; step?: unknown }) : undefined
+    if (event.type === 'step/start' && data !== undefined) {
+      if (typeof data.turn === 'number') scanTurn = data.turn
+      if (typeof data.step === 'number') scanStep = data.step
+    }
+    const range = parseSurfaceOp(event)
+    if (range === undefined) continue
+    let a = 0
+    for (let seq = range.start; seq <= range.end; seq += 1) {
+      a += tokensBySeq.get(seq) ?? priorTokensBySeq.get(seq) ?? 0
+    }
+    const b = tokensBySeq.get(event.seq) ?? 0
+    replaces.push({
+      seq: event.seq,
+      startSeq: range.start,
+      endSeq: range.end,
+      aTokens: a,
+      bTokens: b,
+      kind: b > a ? 'recall' : 'compress',
+      turn: scanTurn,
+      step: scanStep,
+      live: 1,
+    })
+    for (let seq = range.start; seq <= range.end; seq += 1) {
+      covered.add(seq)
+      pointerBySeq.set(seq, { seq: event.seq, turn: scanTurn, step: scanStep })
+    }
+  }
+
+  // 新段行：onSurface/compressed 只由新 covered 决定（旧覆盖够不到新 seq）。
+  // turn/step 归属：单遍滚动 map（全量投影 :406-424 同款，初值取水位滚动）。
+  const turnStepBySeq = new Map<number, { turn: number; step: number }>()
+  {
+    let rollTurn = prior.rollTurn
+    let rollStep = prior.rollStep
+    for (const event of newEvents) {
+      const data = isRecord(event.data) ? (event.data as { turn?: unknown; step?: unknown }) : undefined
+      if (event.type === 'step/start' && data !== undefined) {
+        if (typeof data.turn === 'number') rollTurn = data.turn
+        if (typeof data.step === 'number') rollStep = data.step
+      }
+      turnStepBySeq.set(event.seq, { turn: rollTurn, step: rollStep })
+    }
+  }
+  const segments: ProjectionSegment[] = []
+  for (const event of newEvents) {
+    const text = textBySeq.get(event.seq) ?? ''
+    const searchText = stripInjectedBlocks(extractSearchEventText(event))
+    if (text === '' && searchText === '') continue
+    const pointer = pointerBySeq.get(event.seq)
+    const at = turnStepBySeq.get(event.seq)
+    const row: ProjectionSegment = {
+      seq: event.seq,
+      turn: at !== undefined ? at.turn : prior.rollTurn,
+      step: at !== undefined ? at.step : prior.rollStep,
+      kind: event.type,
+      role: eventRole(event.type),
+      time: typeof event.time === 'number' ? event.time : 0,
+      text,
+      tokens: tokensBySeq.get(event.seq) ?? 0,
+      searchText,
+      onSurface: covered.has(event.seq) ? 0 : 1,
+      compressed: pointer !== undefined ? 1 : 0,
+      surfaceText: pointer !== undefined ? (textBySeq.get(pointer.seq) ?? '') : null,
+      surfaceTokens: pointer !== undefined ? (tokensBySeq.get(pointer.seq) ?? 0) : null,
+      replacedBy: pointer?.seq ?? null,
+    }
+    segments.push(row)
+  }
+
+  // 旧行翻转：新覆盖范围 ∩ 先验段/对。单向 1→0；surface 指针先置直接替身，
+  // 链解析后精化。同批多对覆盖同一 seq：后对为最新替身（pointerBySeq 覆写语义）。
+  const priorRowBySeq = new Map<number, PriorSegmentView>()
+  for (const row of prior.segments) priorRowBySeq.set(row.seq, row)
+  const priorReplaceBySeq = new Map<number, PriorReplaceView>()
+  for (const pair of prior.replaces) priorReplaceBySeq.set(pair.seq, pair)
+  const priorSegmentUpdates = new Map<number, IncrementSegmentUpdate>()
+  const priorReplaceLiveOff: number[] = []
+  const liveOffSeen = new Set<number>()
+  let surfaceTokensDelta = 0
+  let grossSavedDelta = 0
+  for (const pair of replaces) {
+    for (let seq = pair.startSeq; seq <= pair.endSeq; seq += 1) {
+      const priorRow = priorRowBySeq.get(seq)
+      if (priorRow !== undefined) {
+        const existing = priorSegmentUpdates.get(seq)
+        if (existing === undefined) {
+          if (priorRow.onSurface === 1) surfaceTokensDelta -= priorRow.tokens
+          priorSegmentUpdates.set(seq, {
+            seq, onSurface: 0, compressed: 1,
+            surfaceTokens: pair.bTokens, replacedBy: pair.seq,
+          })
+        } else {
+          existing.surfaceTokens = pair.bTokens
+          existing.replacedBy = pair.seq
+        }
+      }
+      const priorPair = priorReplaceBySeq.get(seq)
+      if (priorPair !== undefined && priorPair.live === 1 && !liveOffSeen.has(seq)) {
+        liveOffSeen.add(seq)
+        priorReplaceLiveOff.push(seq)
+        if (priorPair.kind === 'compress') grossSavedDelta -= priorPair.aTokens - priorPair.bTokens
+      }
+    }
+  }
+
+  // 指针链解析（组合视图 = 先验行翻转后值 + 新行初值；全量投影 :385-400 同款，
+  // hop undefined=悬空保留原值；幂等——终替未变时结果不变）。
+  const combinedBySeq = new Map<number, {
+    seq: number; tokens: number; compressed: number
+    replacedBy: number | null; surfaceTokens: number | null
+  }>()
+  for (const row of prior.segments) {
+    const flip = priorSegmentUpdates.get(row.seq)
+    combinedBySeq.set(row.seq, flip !== undefined
+      ? { seq: row.seq, tokens: row.tokens, compressed: flip.compressed, replacedBy: flip.replacedBy, surfaceTokens: flip.surfaceTokens }
+      : { seq: row.seq, tokens: row.tokens, compressed: row.compressed, replacedBy: row.replacedBy, surfaceTokens: row.surfaceTokens })
+  }
+  for (const row of segments) {
+    combinedBySeq.set(row.seq, {
+      seq: row.seq, tokens: row.tokens, compressed: row.compressed,
+      replacedBy: row.replacedBy, surfaceTokens: row.surfaceTokens,
+    })
+  }
+  for (const row of combinedBySeq.values()) {
+    if (row.compressed !== 1 || row.replacedBy === null) continue
+    let hop = combinedBySeq.get(row.replacedBy)
+    let guard = 0
+    while (hop !== undefined && hop.compressed === 1 && hop.replacedBy !== null && guard < 64) {
+      const next = combinedBySeq.get(hop.replacedBy)
+      if (next === undefined || next === hop) break
+      hop = next
+      guard += 1
+    }
+    if (hop !== undefined) {
+      row.surfaceTokens = hop.tokens
+      row.replacedBy = hop.seq
+    }
+  }
+  // 新行回写链解析终值；surfaceText 只在终替是新行时精化（先验行文本不在
+  // 纯函数视界内——非契约面，读侧经 blocks 链派生）。
+  const newRowBySeq = new Map<number, ProjectionSegment>()
+  for (const row of segments) newRowBySeq.set(row.seq, row)
+  for (const row of segments) {
+    const final = combinedBySeq.get(row.seq)
+    if (final === undefined) continue
+    row.surfaceTokens = final.surfaceTokens
+    row.replacedBy = final.replacedBy
+    const terminal = newRowBySeq.get(final.replacedBy ?? -1)
+    if (terminal !== undefined) row.surfaceText = terminal.text
+  }
+  // 先验行终值回写：翻转行 + 链尾连带行（终替被新覆盖 → 指向它的行续跳）。
+  for (const row of prior.segments) {
+    const final = combinedBySeq.get(row.seq)
+    if (final === undefined) continue
+    const flipped = priorSegmentUpdates.get(row.seq) !== undefined
+    const changed = flipped
+      || final.surfaceTokens !== row.surfaceTokens
+      || final.replacedBy !== row.replacedBy
+    if (!changed) continue
+    priorSegmentUpdates.set(row.seq, {
+      seq: row.seq,
+      onSurface: flipped ? 0 : (row.onSurface as 0 | 1),
+      compressed: flipped ? 1 : (row.compressed as 0 | 1),
+      surfaceTokens: final.surfaceTokens,
+      replacedBy: final.replacedBy,
+    })
+  }
+
+  // 汇总合并：可加字段直接加；surfaceTokens/grossSaved 带翻转修正。
+  let segmentTokens = prior.summary.segmentTokens
+  let surfaceTokens = prior.summary.surfaceTokens + surfaceTokensDelta
+  let grossSaved = prior.summary.grossSaved + grossSavedDelta
+  let recallTokens = prior.summary.recallTokens
+  let compressPairs = prior.summary.compressPairs
+  let recallPairs = prior.summary.recallPairs
+  let turnCount = prior.summary.turnCount
+  for (const row of segments) {
+    segmentTokens += row.tokens
+    if (row.onSurface === 1) surfaceTokens += row.tokens
+    if (row.turn > turnCount) turnCount = row.turn
+  }
+  for (const pair of replaces) {
+    if (pair.kind === 'recall') {
+      recallTokens += pair.bTokens
+      recallPairs += 1
+    } else {
+      compressPairs += 1
+      if (pair.live === 1) grossSaved += pair.aTokens - pair.bTokens
+    }
+  }
+  let lastTimeMs = prior.summary.lastTimeMs
+  let maxSeq = prior.summary.maxSeq
+  for (const event of newEvents) {
+    if (typeof event.time === 'number' && event.time > lastTimeMs) lastTimeMs = event.time
+    if (event.seq > maxSeq) maxSeq = event.seq
+  }
+  // 标题按"最后一帧"语义：新帧有标题事件则新标题，否则保留先验标题。
+  const freshTitle = extractTitleFromEvents(newEvents)
+  const summary: SessionSummary = {
+    sessionId,
+    dirId,
+    title: freshTitle !== '' ? freshTitle : prior.summary.title,
+    cwd: prior.summary.cwd,
+    eventCount: prior.summary.eventCount + newEvents.length,
+    maxSeq,
+    turnCount,
+    segmentTokens,
+    surfaceTokens,
+    grossSaved,
+    recallTokens,
+    compressPairs,
+    recallPairs,
+    basis: prior.summary.basis,
+    lastTimeMs,
+    formatGeneration: prior.summary.formatGeneration,
+  }
+  return {
+    newSegments: segments,
+    newReplaces: replaces,
+    priorSegmentUpdates: [...priorSegmentUpdates.values()],
+    priorReplaceLiveOff,
+    summary,
+    // pass-2 滚动终值 = 新批之后的归属状态（空批=先验水位值原样续存）。
+    rollTurn: scanTurn,
+    rollStep: scanStep,
+  }
+}

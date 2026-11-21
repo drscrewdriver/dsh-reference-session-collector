@@ -108,7 +108,7 @@ describe('openProjectionStore / replaceSession', () => {
       const migrated = openProjectionStore(legacyDir)
       try {
         const version = migrated.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value: string }
-        expect(version.value).toBe('5')
+        expect(version.value).toBe('6')
         expect(migrated.summaries.size).toBe(0)
         expect((migrated.db.prepare('SELECT COUNT(*) AS c FROM sessions').get() as { c: number }).c).toBe(0)
         // v5 列形状已重建：text 实列消失、hash 列与 blocks 表在位

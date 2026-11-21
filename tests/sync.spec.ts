@@ -87,6 +87,9 @@ function createMockStore(): MockStore {
       const row = byDir.get(dirId)
       return row === undefined ? undefined : { ...row }
     },
+    // v6 帧级增量端口:mock 面缺省无先验(增量路径自动回退全量,不干扰既有用例)。
+    getSessionState() { return undefined },
+    applyIncrement() { /* 增量用例自带实现 */ },
     replaceSession(projection, meta) {
       replaces.push({ projection, meta })
       // 模拟真身:水位行按 projection.summary 的 dirId/sessionId 注册

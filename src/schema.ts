@@ -9,7 +9,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { SessionProjection, SessionSummary } from './projection.ts'
+import type { SessionIncrementDelta, SessionProjection, SessionSummary } from './projection.ts'
 import { segmentForIndex } from './segment.ts'
 import { BlocksStore, BLOCKS_DDL } from './blocks.ts'
 import { redactSecrets } from './redact.ts'
@@ -22,8 +22,13 @@ import { redactSecrets } from './redact.ts'
  *   surface_text 实列退役→blocks 字典 hash 引用（surface 经 replaced_by
  *   链派生）；新 redacted_text_hash/redacted_search_text_hash（redactSecrets
  *   派生臂，CCI 口径 text 的 token 数学不动）；旧库列形状断裂→DROP 重建
- *   + VACUUM（投影可重建，丢行无损）。 */
-export const PROJECTION_SCHEMA_VERSION = '5'
+ *   + VACUUM（投影可重建，丢行无损）。
+ * v6=帧级增量水位（issue #3）：sessions 加 frame_* 六列——frame_offset
+ *   （下一帧字节偏移，-1=无水位）、frame_consumed（已投影事件数，seq 稠密
+ *   基线）、frame_roll_turn/step（滚动归属续算状态）、frame_basis（token
+ *   口径档，变化即回退全量）、frame_artifact（水位所属产物文件名，换代=
+ *   新文件=旧偏移作废）。旧库 DROP 重建→首轮全量重建投影并立水位。 */
+export const PROJECTION_SCHEMA_VERSION = '6'
 
 /** sessions 表原始行（snake_case 与 DDL 一致）。 */
 export interface SessionRow {
@@ -47,6 +52,31 @@ export interface SessionRow {
   format_generation: number
   archived: number
   synced_at: string
+  frame_offset: number
+  frame_consumed: number
+  frame_roll_turn: number
+  frame_roll_step: number
+  frame_basis: string
+  frame_artifact: string
+}
+
+/**
+ * 帧级增量水位（v6，issue #3）：记录"已消费到哪个字节偏移"。
+ * 不变式：frame_offset 恰落在帧边界（或 torn 区域起点）；frame_consumed
+ * 与投影内容严格一致（含 torn 抢救行——宿主重写区按 seq 前缀去重）。
+ */
+export interface FrameWatermark {
+  /** 下一帧的字节偏移；-1 = 无水位（明文产物/未建立）。 */
+  frame_offset: number
+  /** 已投影事件数（事件 seq 稠密 0..consumed-1）。 */
+  frame_consumed: number
+  /** 水位处的 turn/step 滚动归属（下一帧续算初值）。 */
+  frame_roll_turn: number
+  frame_roll_step: number
+  /** token 口径档（'chars/4'|'ds-token'）；与本轮口径不一致→回退全量。 */
+  frame_basis: string
+  /** 水位所属产物文件名；换代=新文件=旧偏移作废。 */
+  frame_artifact: string
 }
 
 /** replaceSession 的产物 watermark 附加项。 */
@@ -55,6 +85,35 @@ export interface ReplaceSessionExtra {
   archived?: 0 | 1
   /** 预置标题（steward 切料同款，缺省用 projection.summary.title）。 */
   title?: string
+  /** 帧级水位（全量同步成功后建立；明文产物不写=下次仍全量）。 */
+  frame?: FrameWatermark
+}
+
+/** 增量落库的先验行视图（applyIncrement/getSessionState 的存储侧窄投影）。 */
+export interface StoredSegmentView {
+  seq: number
+  tokens: number
+  on_surface: number
+  compressed: number
+  replaced_by: number | null
+  surface_tokens: number | null
+}
+
+export interface StoredReplaceView {
+  seq: number
+  start_seq: number
+  end_seq: number
+  a_tokens: number
+  b_tokens: number
+  kind: 'compress' | 'recall'
+  live: number
+}
+
+/** 一个会话的先验状态（增量投影的折叠基座；由 getSessionState 产出）。 */
+export interface SessionPriorState {
+  row: SessionRow
+  segments: StoredSegmentView[]
+  replaces: StoredReplaceView[]
 }
 
 /** 投影库句柄。 */
@@ -64,6 +123,24 @@ export interface ProjectionStore {
   summaries: Map<string, SessionRow>
   /** 事务式全量重写一个会话；提交后增量更新常驻行。 */
   replaceSession(projection: SessionProjection, artifactBytes: number, artifactMtimeMs: number, extra?: ReplaceSessionExtra): void
+  /**
+   * 先验状态读取（帧级增量投影的折叠基座，issue #3）：sessions 行 + 全量
+   * segments/replaces 窄视图。O(会话行数) 的纯 SQL 读，无解压——相对被
+   * 消掉的 zstd 重解压是数量级更小的成本（README「规模边界」已标注）。
+   */
+  getSessionState(sessionId: string): SessionPriorState | undefined
+  /**
+   * 事务式增量落库（issue #3）：INSERT 新段/对/FTS + UPDATE 旧行翻转与链尾
+   * 重解析 + sessions 行聚合合并 + 水位推进 + 常驻 Map 同步。与 replaceSession
+   * 同一 WAL 事务纪律；任何失败整体回滚，调用方回退全量。
+   */
+  applyIncrement(
+    sessionId: string,
+    delta: SessionIncrementDelta,
+    artifactBytes: number,
+    artifactMtimeMs: number,
+    extra?: ReplaceSessionExtra,
+  ): void
   /** 翻转归档旗标（不动投影内容）。 */
   setArchived(sessionId: string, archived: 0 | 1): void
   /**
@@ -87,7 +164,13 @@ CREATE TABLE IF NOT EXISTS sessions(
   last_time_ms INTEGER DEFAULT 0,
   format_generation INTEGER DEFAULT -1,
   archived INTEGER DEFAULT 0,
-  synced_at TEXT DEFAULT (datetime('now')));
+  synced_at TEXT DEFAULT (datetime('now')),
+  frame_offset INTEGER DEFAULT -1,
+  frame_consumed INTEGER DEFAULT 0,
+  frame_roll_turn INTEGER DEFAULT 0,
+  frame_roll_step INTEGER DEFAULT 0,
+  frame_basis TEXT DEFAULT '',
+  frame_artifact TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_sessions_dir ON sessions(dir_id);
 CREATE TABLE IF NOT EXISTS segments(
   session_id TEXT NOT NULL, seq INTEGER NOT NULL, turn INTEGER DEFAULT 0,
@@ -138,6 +221,12 @@ function summaryToRow(s: SessionSummary, artifactBytes: number, artifactMtimeMs:
     format_generation: s.formatGeneration,
     archived: extra?.archived ?? 0,
     synced_at: new Date().toISOString(),
+    frame_offset: extra?.frame?.frame_offset ?? -1,
+    frame_consumed: extra?.frame?.frame_consumed ?? 0,
+    frame_roll_turn: extra?.frame?.frame_roll_turn ?? 0,
+    frame_roll_step: extra?.frame?.frame_roll_step ?? 0,
+    frame_basis: extra?.frame?.frame_basis ?? '',
+    frame_artifact: extra?.frame?.frame_artifact ?? '',
   }
 }
 
@@ -200,8 +289,9 @@ PRAGMA application_id=0x44525343;
   const upsertSession = db.prepare(`INSERT INTO sessions(
     session_id, dir_id, title, cwd, event_count, max_seq, turn_count, segment_tokens,
     surface_tokens, gross_saved, recall_tokens, compress_pairs, recall_pairs, basis,
-    artifact_bytes, artifact_mtime_ms, last_time_ms, format_generation, archived, synced_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    artifact_bytes, artifact_mtime_ms, last_time_ms, format_generation, archived, synced_at,
+    frame_offset, frame_consumed, frame_roll_turn, frame_roll_step, frame_basis, frame_artifact)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(session_id) DO UPDATE SET
       dir_id=excluded.dir_id, title=excluded.title, cwd=excluded.cwd,
       event_count=excluded.event_count, max_seq=excluded.max_seq,
@@ -212,7 +302,15 @@ PRAGMA application_id=0x44525343;
       artifact_bytes=excluded.artifact_bytes, artifact_mtime_ms=excluded.artifact_mtime_ms,
       last_time_ms=excluded.last_time_ms, format_generation=excluded.format_generation,
       archived=excluded.archived,
-      synced_at=excluded.synced_at`)
+      synced_at=excluded.synced_at,
+      frame_offset=excluded.frame_offset, frame_consumed=excluded.frame_consumed,
+      frame_roll_turn=excluded.frame_roll_turn, frame_roll_step=excluded.frame_roll_step,
+      frame_basis=excluded.frame_basis, frame_artifact=excluded.frame_artifact`)
+  // 增量面（v6,issue #3）：旧行翻转与链尾重解析的定点 UPDATE。
+  const updateSegmentSurface = db.prepare(`UPDATE segments SET
+    on_surface=?, compressed=?, surface_tokens=?, replaced_by=?
+    WHERE session_id=? AND seq=?`)
+  const updateReplaceLive = db.prepare(`UPDATE replaces SET live=0 WHERE session_id=? AND seq=?`)
 
   return {
     db,
@@ -256,6 +354,63 @@ PRAGMA application_id=0x44525343;
       }
       // 缓存层 2：事务提交后增量更新常驻行。
       summaries.set(row.session_id, row)
+    },
+    getSessionState(sessionId) {
+      const row = summaries.get(sessionId)
+      if (row === undefined) return undefined
+      const segments = db.prepare(`SELECT seq, tokens, on_surface, compressed, replaced_by, surface_tokens
+        FROM segments WHERE session_id=? ORDER BY seq`).all(sessionId) as unknown as StoredSegmentView[]
+      const replaces = db.prepare(`SELECT seq, start_seq, end_seq, a_tokens, b_tokens, kind, live
+        FROM replaces WHERE session_id=? ORDER BY seq`).all(sessionId) as unknown as StoredReplaceView[]
+      return { row, segments, replaces }
+    },
+    applyIncrement(sessionId, delta, artifactBytes, artifactMtimeMs, extra) {
+      const prior = summaries.get(sessionId)
+      if (prior === undefined) throw new Error(`applyIncrement: no prior session row ${sessionId}`)
+      const { summary, newSegments, newReplaces } = delta
+      const row = summaryToRow(summary, artifactBytes, artifactMtimeMs, extra)
+      db.exec('BEGIN')
+      try {
+        // 新段/对/FTS：与全量路径同一插入面（blocks 字典、脱敏派生臂同源）。
+        for (const seg of newSegments) {
+          const redText = redactSecrets(seg.text).text
+          const redSearch = redactSecrets(seg.searchText).text
+          insertSegment.run(sessionId, seg.seq, seg.turn, seg.step, seg.kind, seg.role,
+            seg.time, blocks.ensure(seg.text), seg.tokens, blocks.ensure(seg.searchText),
+            blocks.ensure(redText), blocks.ensure(redSearch),
+            seg.onSurface, seg.compressed, seg.surfaceTokens, seg.replacedBy)
+        }
+        for (const rep of newReplaces) {
+          insertReplace.run(sessionId, rep.seq, rep.startSeq, rep.endSeq,
+            rep.aTokens, rep.bTokens, rep.kind, rep.turn, rep.step, rep.live)
+        }
+        for (const seg of newSegments) {
+          if (seg.searchText === '') continue
+          insertFts.run(segmentForIndex(seg.searchText), sessionId, seg.seq, seg.kind)
+        }
+        // 旧行翻转/链尾重解析：定点 UPDATE（纯函数已算好终值，这里只落库）。
+        for (const upd of delta.priorSegmentUpdates) {
+          updateSegmentSurface.run(upd.onSurface, upd.compressed, upd.surfaceTokens, upd.replacedBy,
+            sessionId, upd.seq)
+        }
+        for (const seq of delta.priorReplaceLiveOff) {
+          updateReplaceLive.run(sessionId, seq)
+        }
+        upsertSession.run(
+          row.session_id, row.dir_id, row.title, row.cwd, row.event_count, row.max_seq,
+          row.turn_count, row.segment_tokens, row.surface_tokens, row.gross_saved,
+          row.recall_tokens, row.compress_pairs, row.recall_pairs, row.basis,
+          row.artifact_bytes, row.artifact_mtime_ms, row.last_time_ms, row.format_generation,
+          row.archived, row.synced_at,
+          row.frame_offset, row.frame_consumed, row.frame_roll_turn, row.frame_roll_step,
+          row.frame_basis, row.frame_artifact)
+        db.exec('COMMIT')
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+      // 缓存层 2：提交后增量更新常驻行。
+      summaries.set(sessionId, row)
     },
     setArchived(sessionId, archived) {
       const current = summaries.get(sessionId)
